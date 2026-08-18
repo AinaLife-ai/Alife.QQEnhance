@@ -7,6 +7,7 @@
   "tags": ["qq", "enhance", "sticker", "like", "ban"],
   "description": "QQ增强插件：贴表情、点赞、撤回、禁言、音乐卡片、感知通知、输入中状态",
   "repo": "https://github.com/AinaLife-ai/Alife.QQEnhance",
+  "Version": "4.2.0",
   "Dependencies": {
     "Alife.Function.FunctionCaller": "",
     "Alife.Function.QChat": ""
