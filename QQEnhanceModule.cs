@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
-using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,7 +10,7 @@ using Alife.Function.FunctionCaller;
 using Alife.Function.QChat;
 using Microsoft.Extensions.Logging;
 
-namespace Alife.Demo.Plugin.QQEnhance;
+namespace AinaLife.QQEnhance;
 
 public class QQEnhanceConfig
 {
@@ -61,7 +61,7 @@ public class QQEnhanceConfig
 
 [Module("QQ增强",
     "提供QQ贴表情、点赞、撤回、禁言、音乐卡片、感知通知、输入中状态等增强功能",
-    defaultCategory: "Alife 官方/社交平台")]
+    defaultCategory: "AinaLife/社交平台")]
 public class QQEnhanceModule(
     XmlFunctionCaller functionCaller,
     ILogger<QQEnhanceModule> logger,
@@ -72,7 +72,13 @@ public class QQEnhanceModule(
 {
     public QQEnhanceConfig Configuration { get; set; } = null!;
 
-    private OneBotClient Client => qChatService.OneBotClient;
+    // QChatService 未公开 OneBotClient，通过反射获取（不修改官方代码）
+    private OneBotClient? GetClient()
+    {
+        FieldInfo? field = typeof(QChatService).GetField("oneBotClient",
+            BindingFlags.NonPublic | BindingFlags.Instance);
+        return field?.GetValue(qChatService) as OneBotClient;
+    }
 
     // Typing indicator 状态管理
     private readonly Dictionary<long, CancellationTokenSource> _typingCts = new();
@@ -85,8 +91,15 @@ public class QQEnhanceModule(
         };
         functionCaller.RegisterHandler(xmlHandler, DocumentMode.Implicit, DestroyCancellationToken);
 
+        OneBotClient? client = GetClient();
+        if (client == null)
+        {
+            logger.LogWarning("无法获取 OneBotClient，QQ增强功能不可用（请确认已启用QQ聊天模块）");
+            return Task.CompletedTask;
+        }
+
         if (Configuration.PerceiveGroupBan || Configuration.PerceiveGroupIncrease)
-            Client.EventReceived += OnEventReceived;
+            client.EventReceived += OnEventReceived;
 
         if (Configuration.TypingIndicatorEnabled)
         {
@@ -99,7 +112,10 @@ public class QQEnhanceModule(
 
     protected override Task OnDestroy()
     {
-        Client.EventReceived -= OnEventReceived;
+        OneBotClient? client = GetClient();
+        if (client != null)
+            client.EventReceived -= OnEventReceived;
+
         ChatBot.ChatSent -= OnChatSent;
         ChatBot.ChatOver -= OnChatOver;
 
@@ -121,9 +137,11 @@ public class QQEnhanceModule(
         [Description("消息ID")] long messageId,
         [Description("表情ID")] int emojiId)
     {
+        OneBotClient? client = GetClient();
+        if (client == null) { interactor.Poke("贴表情失败：QQ客户端不可用"); return; }
         try
         {
-            await Client.CallActionAsync<object>("set_msg_emoji_like", new { message_id = messageId, emoji_id = emojiId });
+            await client.CallActionAsync<object>("set_msg_emoji_like", new { message_id = messageId, emoji_id = emojiId });
             interactor.Poke("贴表情成功");
         }
         catch (Exception e)
@@ -138,6 +156,8 @@ public class QQEnhanceModule(
         [Description("QQ号")] long qq,
         [Description("点赞次数，默认50次")] int times = 50)
     {
+        OneBotClient? client = GetClient();
+        if (client == null) { interactor.Poke("点赞失败：QQ客户端不可用"); return; }
         try
         {
             var chunks = new List<int>();
@@ -147,7 +167,7 @@ public class QQEnhanceModule(
             int count = 0;
             foreach (int chunk in chunks)
             {
-                await Client.CallActionAsync<object>("send_like", new { user_id = qq, times = chunk });
+                await client.CallActionAsync<object>("send_like", new { user_id = qq, times = chunk });
                 count += chunk;
                 await Task.Delay(100);
             }
@@ -164,9 +184,11 @@ public class QQEnhanceModule(
     public async Task DeleteMsg(
         [Description("消息ID")] long messageId)
     {
+        OneBotClient? client = GetClient();
+        if (client == null) { interactor.Poke("撤回失败：QQ客户端不可用"); return; }
         try
         {
-            await Client.CallActionAsync<object>("delete_msg", new { message_id = messageId });
+            await client.CallActionAsync<object>("delete_msg", new { message_id = messageId });
             interactor.Poke("撤回成功");
         }
         catch (Exception e)
@@ -182,9 +204,11 @@ public class QQEnhanceModule(
         [Description("QQ号")] long userId,
         [Description("禁言时长(秒)，默认600秒，0为解除禁言")] int duration = 600)
     {
+        OneBotClient? client = GetClient();
+        if (client == null) { interactor.Poke("禁言失败：QQ客户端不可用"); return; }
         try
         {
-            await Client.CallActionAsync<object>("set_group_ban", new { group_id = groupId, user_id = userId, duration });
+            await client.CallActionAsync<object>("set_group_ban", new { group_id = groupId, user_id = userId, duration });
             interactor.Poke("禁言成功");
         }
         catch (Exception e)
@@ -201,13 +225,15 @@ public class QQEnhanceModule(
         [Description("音乐平台(qq/163/kugou/migu/kuwo)")] string platform,
         [Description("音乐ID")] string musicId)
     {
+        OneBotClient? client = GetClient();
+        if (client == null) { interactor.Poke("音乐卡片发送失败：QQ客户端不可用"); return; }
         try
         {
             string message = $"[CQ:music,type={platform},id={musicId}]";
             if (type == "group")
-                await Client.SendGroupMessage(targetId, message);
+                await client.SendGroupMessage(targetId, message);
             else
-                await Client.SendPrivateMessage(targetId, message);
+                await client.SendPrivateMessage(targetId, message);
             interactor.Poke("音乐卡片发送成功");
         }
         catch (Exception e)
@@ -231,23 +257,20 @@ public class QQEnhanceModule(
                 if (noticeEvent.SelfId == noticeEvent.UserId)
                 {
                     string subType = noticeEvent.SubType ?? "";
-                    long operatorId = noticeEvent.UserId;
-                    long groupId = noticeEvent.GroupId;
-                    string operatorName = await GetQQUserName(operatorId, groupId);
-                    string operatorText = string.IsNullOrEmpty(operatorName)
-                        ? $"用户{operatorId}"
-                        : $"用户{operatorId}({operatorName})";
-
                     if (subType == "ban")
-                        interactor.Poke($"[System {operatorText}禁言了你]");
+                        interactor.Poke("[System 你被禁言了]");
                     else if (subType == "lift_ban")
-                        interactor.Poke($"[System 你之前被禁言了，{operatorText}解除了你的禁言]");
+                        interactor.Poke("[System 你被解除禁言了]");
                 }
             }
             else if (noticeType == "group_increase" && Configuration.PerceiveGroupIncrease)
             {
                 long userId = noticeEvent.UserId;
-                interactor.Poke($"[System 用户{userId}加入了群聊]");
+                string userName = await GetQQUserName(userId, noticeEvent.GroupId);
+                string userText = string.IsNullOrEmpty(userName)
+                    ? $"用户{userId}"
+                    : $"用户{userId}({userName})";
+                interactor.Poke($"[System {userText}加入了群聊]");
             }
         }
         catch (Exception e)
@@ -258,11 +281,13 @@ public class QQEnhanceModule(
 
     private async Task<string> GetQQUserName(long userId, long groupId = 0)
     {
+        OneBotClient? client = GetClient();
+        if (client == null) return "";
         try
         {
             if (groupId != 0)
             {
-                var sender = await Client.CallActionAsync<OneBotSender>(
+                var sender = await client.CallActionAsync<OneBotSender>(
                     "get_group_member_info",
                     new { group_id = groupId, user_id = userId, no_cache = false });
                 if (sender != null)
@@ -272,7 +297,7 @@ public class QQEnhanceModule(
                 }
             }
 
-            var stranger = await Client.CallActionAsync<OneBotSender>(
+            var stranger = await client.CallActionAsync<OneBotSender>(
                 "get_stranger_info",
                 new { user_id = userId });
             return stranger?.Nickname ?? "";
@@ -328,6 +353,9 @@ public class QQEnhanceModule(
 
     private async Task RunTypingLoopAsync(long userId, CancellationToken ct)
     {
+        OneBotClient? client = GetClient();
+        if (client == null) return;
+
         try
         {
             await Task.Delay(TimeSpan.FromSeconds(Configuration.TypingDelaySeconds), ct);
@@ -335,7 +363,7 @@ public class QQEnhanceModule(
             var startTime = DateTime.Now;
             while (!ct.IsCancellationRequested)
             {
-                await Client.CallActionAsync<object>("set_input_status", new { user_id = userId, event_type = 1 });
+                await client.CallActionAsync<object>("set_input_status", new { user_id = userId, event_type = 1 });
 
                 if ((DateTime.Now - startTime).TotalSeconds >= Configuration.TypingMaxSeconds)
                     break;
