@@ -11,8 +11,9 @@ QQ增强插件：贴表情、点赞、撤回、禁言、音乐卡片、感知通
 - 撤回QQ消息
 - 禁言QQ群成员
 - 发送QQ音乐卡片
-- 感知自己被禁言/解除禁言
-- 感知新成员进群
+- 感知自己被禁言/解除禁言（通知携带群号与群名）
+- 感知新成员进群（通知携带群号与群名）
+- 获取群聊/私聊最近消息及消息ID（`QGetMessages`，用于定位撤回/贴表情目标）
 - 私聊输入中状态
 
 ## 依赖
@@ -22,7 +23,7 @@ QQ增强插件：贴表情、点赞、撤回、禁言、音乐卡片、感知通
 
 ## 安装
 
-将 `QQEnhance` 文件夹放入 Alife 的 `Plugins` 目录，同步环境后启用模块即可。
+将 `Alife.QQEnhance` 文件夹放入 Alife 的 `Plugins` 目录，同步环境后启用模块即可。
 
 ## 配置
 
@@ -44,3 +45,4 @@ QQ增强插件：贴表情、点赞、撤回、禁言、音乐卡片、感知通
 
 - 需要先启用 Alife 官方 QQ聊天模块（`Alife.Function.QChat`）
 - 本插件通过反射访问 `QChatService` 内部的 `OneBotClient`，不修改官方代码
+- 撤回/贴表情需要先调用 `QGetMessages` 获取目标消息ID；历史消息接口依赖 OneBot 实现支持 `get_group_msg_history`/`get_friend_msg_history`（LLOneBot/NapCat 等均支持）
