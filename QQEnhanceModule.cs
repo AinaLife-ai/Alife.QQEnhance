@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Reflection;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -87,7 +90,7 @@ public class QQEnhanceModule(
     protected override Task OnAwake()
     {
         XmlHandler xmlHandler = new(this) {
-            Description = "提供QQ贴表情、点赞、撤回、禁言、音乐卡片等增强功能"
+            Description = "提供QQ贴表情、点赞、撤回、禁言、音乐卡片、消息ID查询等增强功能"
         };
         functionCaller.RegisterHandler(xmlHandler, DocumentMode.Implicit, DestroyCancellationToken);
 
@@ -180,7 +183,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("撤回QQ消息")]
+    [Description("撤回QQ消息。消息ID可通过QGetMessages获取")]
     public async Task DeleteMsg(
         [Description("消息ID")] long messageId)
     {
@@ -198,7 +201,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("禁言QQ群成员")]
+    [Description("禁言QQ群成员。群号可从群消息标签[群聊消息(群号,群名)]中获取")]
     public async Task GroupBan(
         [Description("群号")] long groupId,
         [Description("QQ号")] long userId,
@@ -242,7 +245,69 @@ public class QQEnhanceModule(
         }
     }
 
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("获取群聊/私聊最近消息及每条消息的消息ID，用于定位要撤回(DeleteMsg)或贴表情(SetEmoji)的消息。群聊传groupId；私聊传groupId=0并传userId")]
+    public async Task QGetMessages(
+        [Description("群号（私聊时传0）")] long groupId,
+        [Description("QQ号（仅私聊时需要）")] long userId = 0,
+        [Description("获取条数，1-50，默认10")] int count = 10)
+    {
+        OneBotClient? client = GetClient();
+        if (client == null) { interactor.Poke("获取消息失败：QQ客户端不可用"); return; }
+        try
+        {
+            count = Math.Clamp(count, 1, 50);
+            string action = groupId != 0 ? "get_group_msg_history" : "get_friend_msg_history";
+            object prms = groupId != 0
+                ? new { group_id = groupId, count }
+                : new { user_id = userId, count };
+
+            JsonElement? data = await client.CallActionAsync<JsonElement>(action, prms);
+            if (data == null || data.Value.ValueKind != JsonValueKind.Array || data.Value.GetArrayLength() == 0)
+            {
+                interactor.Poke(groupId != 0
+                    ? $"群 {groupId} 没有历史消息或接口不支持（需要LLOneBot/NapCat等支持get_group_msg_history的实现）"
+                    : $"与 {userId} 没有历史消息或接口不支持（需要支持get_friend_msg_history的实现）");
+                return;
+            }
+
+            StringBuilder sb = new();
+            int len = data.Value.GetArrayLength();
+            sb.AppendLine(groupId != 0
+                ? $"群 {groupId} 最近 {len} 条消息（[消息ID:xxx]可用于撤回/贴表情）："
+                : $"与 {userId} 最近 {len} 条消息（[消息ID:xxx]可用于撤回/贴表情）：");
+            foreach (JsonElement msg in data.Value.EnumerateArray())
+            {
+                long mid = msg.TryGetProperty("message_id", out var m) && m.ValueKind == JsonValueKind.Number ? m.GetInt64() : 0;
+                long uid = msg.TryGetProperty("user_id", out var u) && u.ValueKind == JsonValueKind.Number ? u.GetInt64() : 0;
+                string nick = "";
+                if (msg.TryGetProperty("sender", out var s) && s.ValueKind == JsonValueKind.Object &&
+                    s.TryGetProperty("nickname", out var n) && n.ValueKind == JsonValueKind.String)
+                    nick = n.GetString() ?? "";
+                string raw = msg.TryGetProperty("raw_message", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() ?? "" : "";
+                long t = msg.TryGetProperty("time", out var tm) && tm.ValueKind == JsonValueKind.Number ? tm.GetInt64() : 0;
+                DateTime time = DateTimeOffset.FromUnixTimeSeconds(t).LocalDateTime;
+                raw = OneBotSegment.FilterFace(OneBotSegment.FilterAt(OneBotSegment.FilterImage(OneBotSegment.FilterRecord(raw))));
+                sb.AppendLine($"[{time:HH:mm:ss}] {uid}({nick}) [消息ID:{mid}] {raw}");
+            }
+            interactor.Poke(sb.ToString());
+        }
+        catch (Exception e)
+        {
+            interactor.Poke($"获取消息失败：{e.Message}");
+        }
+    }
+
     // ==================== notice感知 ====================
+
+    private sealed class GroupInfoData
+    {
+        [JsonPropertyName("group_id")]
+        public long GroupId { get; init; }
+
+        [JsonPropertyName("group_name")]
+        public string? GroupName { get; init; }
+    }
 
     private async void OnEventReceived(OneBotBaseEvent oneBotEvent)
     {
@@ -257,10 +322,11 @@ public class QQEnhanceModule(
                 if (noticeEvent.SelfId == noticeEvent.UserId)
                 {
                     string subType = noticeEvent.SubType ?? "";
+                    string groupInfo = await GetGroupInfoText(noticeEvent.GroupId);
                     if (subType == "ban")
-                        interactor.Poke("[System 你被禁言了]");
+                        interactor.Poke($"[System 你被禁言了（{groupInfo}）]");
                     else if (subType == "lift_ban")
-                        interactor.Poke("[System 你被解除禁言了]");
+                        interactor.Poke($"[System 你被解除禁言了（{groupInfo}）]");
                 }
             }
             else if (noticeType == "group_increase" && Configuration.PerceiveGroupIncrease)
@@ -270,12 +336,40 @@ public class QQEnhanceModule(
                 string userText = string.IsNullOrEmpty(userName)
                     ? $"用户{userId}"
                     : $"用户{userId}({userName})";
-                interactor.Poke($"[System {userText}加入了群聊]");
+                string groupInfo = await GetGroupInfoText(noticeEvent.GroupId);
+                interactor.Poke($"[System {userText}加入了群聊（{groupInfo}）]");
             }
         }
         catch (Exception e)
         {
             logger.LogError(e, "感知notice事件失败");
+        }
+    }
+
+    private async Task<string> GetGroupInfoText(long groupId)
+    {
+        if (groupId == 0) return "群号:未知";
+        string name = await GetGroupNameAsync(groupId);
+        return string.IsNullOrEmpty(name) ? $"群号:{groupId}" : $"群号:{groupId} 群名:{name}";
+    }
+
+    private async Task<string> GetGroupNameAsync(long groupId)
+    {
+        // 优先从 QChatService 的群状态缓存拿群名（群里有消息活动时已有）
+        if (qChatService.GroupStates.TryGetValue(groupId, out var state) && !string.IsNullOrEmpty(state.Name))
+            return state.Name!;
+
+        OneBotClient? client = GetClient();
+        if (client == null) return "";
+        try
+        {
+            var info = await client.CallActionAsync<GroupInfoData>("get_group_info", new { group_id = groupId, no_cache = false });
+            return info?.GroupName ?? "";
+        }
+        catch (Exception e)
+        {
+            logger.LogWarning(e, "获取群名失败: {GroupId}", groupId);
+            return "";
         }
     }
 
