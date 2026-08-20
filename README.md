@@ -45,4 +45,5 @@ QQ增强插件：贴表情、点赞、撤回、禁言、音乐卡片、感知通
 
 - 需要先启用 Alife 官方 QQ聊天模块（`Alife.Function.QChat`）
 - 本插件通过反射访问 `QChatService` 内部的 `OneBotClient`，不修改官方代码
-- 撤回/贴表情需要先调用 `QGetMessages` 获取目标消息ID；历史消息接口依赖 OneBot 实现支持 `get_group_msg_history`/`get_friend_msg_history`（LLOneBot/NapCat 等均支持）
+- **QQ平台消息ID为负数**。撤回/贴表情/引用回复（CQ:reply）必须使用 `QGetMessages` 返回的真实消息ID，严禁编造或猜测（否则 RetCode 100/1400 失败）
+- 历史消息接口依赖 OneBot 实现支持 `get_group_msg_history`/`get_friend_msg_history`（LLOneBot/NapCat 等均支持）
