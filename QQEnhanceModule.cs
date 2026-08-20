@@ -90,7 +90,14 @@ public class QQEnhanceModule(
     protected override Task OnAwake()
     {
         XmlHandler xmlHandler = new(this) {
-            Description = "提供QQ贴表情、点赞、撤回、禁言、音乐卡片、消息ID查询等增强功能"
+            Description = "提供QQ贴表情、点赞、撤回、禁言、音乐卡片、消息ID查询等增强功能。⚠重要：QQ消息ID为负数，撤回/贴表情/引用回复必须先用qgetmessages获取真实消息ID，严禁编造",
+            Explanation = """
+                使用规则：
+                - QQ平台消息ID通常是负数（如 -1976879391），编造或猜ID必然失败（RetCode 100/1400）。
+                - 要撤回(deleteMsg)/贴表情(setemoji)/引用回复(CQ:reply)某条消息，必须先调用 qgetmessages 获取真实ID列表，从中选取。
+                - qgetmessages 返回格式：[消息ID:xxx] 即该消息的真实ID，直接原样使用。
+                - 引用回复消息格式：[CQ:reply,id=真实ID]文本，id必须来自qgetmessages。
+                """
         };
         functionCaller.RegisterHandler(xmlHandler, DocumentMode.Implicit, DestroyCancellationToken);
 
@@ -135,9 +142,9 @@ public class QQEnhanceModule(
     // ==================== 工具函数 ====================
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("给QQ消息贴表情。emoji_id为表情ID，如 201(点赞)/2(开心)/3(疑惑)等")]
+    [Description("给QQ消息贴表情。emoji_id为表情ID，如 201(点赞)/2(开心)/3(疑惑)等。⚠messageId必须先用qgetmessages获取真实消息ID（QQ消息ID为负数），严禁编造或猜测ID")]
     public async Task SetEmoji(
-        [Description("消息ID")] long messageId,
+        [Description("消息ID（必须来自qgetmessages返回的真实ID）")] long messageId,
         [Description("表情ID")] int emojiId)
     {
         OneBotClient? client = GetClient();
@@ -183,9 +190,9 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("撤回QQ消息。消息ID可通过QGetMessages获取")]
+    [Description("撤回QQ消息。⚠messageId必须先用qgetmessages获取真实消息ID（QQ消息ID为负数），严禁编造或猜测ID")]
     public async Task DeleteMsg(
-        [Description("消息ID")] long messageId)
+        [Description("消息ID（必须来自qgetmessages返回的真实ID）")] long messageId)
     {
         OneBotClient? client = GetClient();
         if (client == null) { interactor.Poke("撤回失败：QQ客户端不可用"); return; }
@@ -274,17 +281,26 @@ public class QQEnhanceModule(
             StringBuilder sb = new();
             int len = data.Value.GetArrayLength();
             sb.AppendLine(groupId != 0
-                ? $"群 {groupId} 最近 {len} 条消息（[消息ID:xxx]可用于撤回/贴表情）："
-                : $"与 {userId} 最近 {len} 条消息（[消息ID:xxx]可用于撤回/贴表情）：");
+                ? $"群 {groupId} 最近 {len} 条消息（[消息ID:xxx]即真实ID，可能是负数，直接用于撤回/贴表情/引用回复）："
+                : $"与 {userId} 最近 {len} 条消息（[消息ID:xxx]即真实ID，可能是负数，直接用于撤回/贴表情/引用回复）：");
             foreach (JsonElement msg in data.Value.EnumerateArray())
             {
-                long mid = msg.TryGetProperty("message_id", out var m) && m.ValueKind == JsonValueKind.Number ? m.GetInt64() : 0;
+                long mid = 0;
+                if (msg.TryGetProperty("message_id", out var m))
+                {
+                    if (m.ValueKind == JsonValueKind.Number) mid = m.GetInt64();
+                    else if (m.ValueKind == JsonValueKind.String && long.TryParse(m.GetString(), out long parsed)) mid = parsed;
+                }
                 long uid = msg.TryGetProperty("user_id", out var u) && u.ValueKind == JsonValueKind.Number ? u.GetInt64() : 0;
                 string nick = "";
                 if (msg.TryGetProperty("sender", out var s) && s.ValueKind == JsonValueKind.Object &&
                     s.TryGetProperty("nickname", out var n) && n.ValueKind == JsonValueKind.String)
                     nick = n.GetString() ?? "";
-                string raw = msg.TryGetProperty("raw_message", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() ?? "" : "";
+                string raw = "";
+                if (msg.TryGetProperty("raw_message", out var r) && r.ValueKind == JsonValueKind.String)
+                    raw = r.GetString() ?? "";
+                else if (msg.TryGetProperty("message", out var m2) && m2.ValueKind == JsonValueKind.String)
+                    raw = m2.GetString() ?? "";
                 long t = msg.TryGetProperty("time", out var tm) && tm.ValueKind == JsonValueKind.Number ? tm.GetInt64() : 0;
                 DateTime time = DateTimeOffset.FromUnixTimeSeconds(t).LocalDateTime;
                 raw = OneBotSegment.FilterFace(OneBotSegment.FilterAt(OneBotSegment.FilterImage(OneBotSegment.FilterRecord(raw))));
