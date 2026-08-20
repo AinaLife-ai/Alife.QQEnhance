@@ -41,6 +41,22 @@ public class QQEnhanceConfig
     [Description("启用发送音乐卡片功能")]
     public bool MusicCardEnabled { get; set; } = false;
 
+    [DisplayName("戳一戳")]
+    [Description("启用群聊戳一戳成员功能")]
+    public bool PokeEnabled { get; set; } = true;
+
+    [DisplayName("引用回复")]
+    [Description("启用引用回复消息功能")]
+    public bool ReplyEnabled { get; set; } = true;
+
+    [DisplayName("合并转发")]
+    [Description("启用合并转发消息功能（转发已有/构造新转发）")]
+    public bool ForwardEnabled { get; set; } = true;
+
+    [DisplayName("兼容模式")]
+    [Description("与YuYang.QQTools（幼央工具箱）的协作模式：Auto=检测到幼央自动让位重叠功能；PreferQQEnhance=优先本插件；PreferYuYang=重叠功能一律让位（幼央未装时自动回退自持）；Off=不检测全功能注册")]
+    public string CompatibilityMode { get; set; } = "Auto";
+
     [DisplayName("感知群禁言")]
     [Description("感知自己被禁言/解除禁言并通知AI")]
     public bool PerceiveGroupBan { get; set; } = true;
@@ -75,17 +91,21 @@ public class QQEnhanceConfig
 }
 
 [Module("QQ增强",
-    "提供QQ贴表情、点赞、撤回、禁言、音乐卡片、感知通知、输入中状态等增强功能",
+    "提供QQ贴表情、点赞、撤回、禁言、戳一戳、引用回复、合并转发、音乐卡片、感知通知、输入中状态等增强功能，支持与YuYang.QQTools自动分工",
     defaultCategory: "AinaLife/社交平台")]
 public class QQEnhanceModule(
     XmlFunctionCaller functionCaller,
     ILogger<QQEnhanceModule> logger,
     Interactor<QQEnhanceModule> interactor,
-    QChatService qChatService) :
+    QChatService qChatService,
+    ModuleSystem moduleSystem) :
     ChatBehaviour,
     IConfigurable<QQEnhanceConfig>
 {
     public QQEnhanceConfig Configuration { get; set; } = null!;
+
+    /// <summary>幼央工具箱模块的完整类型名（ModuleSystem.GetModuleID = FullName）</summary>
+    private const string YuYangModuleId = "YuYang.QQTools.QQToolsModule";
 
     // QChatService 未公开 OneBotClient，通过反射获取（不修改官方代码）
     private OneBotClient? GetClient()
@@ -93,6 +113,39 @@ public class QQEnhanceModule(
         FieldInfo? field = typeof(QChatService).GetField("oneBotClient",
             BindingFlags.NonPublic | BindingFlags.Instance);
         return field?.GetValue(qChatService) as OneBotClient;
+    }
+
+    // ==================== 幼央兼容检测 ====================
+
+    /// <summary>幼央工具箱是否已加载且被当前角色启用</summary>
+    private bool IsYuYangActive()
+    {
+        try
+        {
+            if (moduleSystem.GetModule(YuYangModuleId) == null) return false;
+            return Character.Modules.Contains(YuYangModuleId);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>重叠功能是否应让位给幼央（运行时实时判断，幼央热装卸载后自动恢复）</summary>
+    private bool ShouldDelegate()
+    {
+        return Configuration.CompatibilityMode switch
+        {
+            "PreferQQEnhance" => false,
+            "PreferYuYang" => IsYuYangActive(),
+            "Off" => false,
+            _ => IsYuYangActive() // Auto
+        };
+    }
+
+    private string DelegateHint(string feature, string yuYangFunction)
+    {
+        return $"{feature}功能由 YuYang.QQTools（幼央工具箱）接管，请调用幼央的 {yuYangFunction} 函数";
     }
 
     // Typing indicator 状态管理
@@ -221,16 +274,34 @@ public class QQEnhanceModule(
 
     protected override Task OnAwake()
     {
-        XmlHandler xmlHandler = new(this) {
-            Description = "提供QQ贴表情、点赞、撤回、禁言、音乐卡片、消息ID查询等增强功能。⚠重要：QQ消息ID为负数，撤回/贴表情/引用回复必须先用qgetmessages获取真实消息ID，严禁编造",
-            Explanation = """
+        bool yuYangActive = IsYuYangActive();
+        if (yuYangActive)
+            logger.LogInformation("QQ增强：检测到 YuYang.QQTools 已启用，重叠功能将让位（兼容模式 {Mode}）", Configuration.CompatibilityMode);
+
+        string explanation = yuYangActive
+            ? $$"""
+                使用规则：
+                - 已检测到 YuYang.QQTools（幼央工具箱）接管：戳一戳、引用回复、点赞、贴表情、撤回、输入中 请调用幼央的函数（PokeGroupMember/SendReplyMessage/SendLike/SendEmojiLike/DeleteMessage）。
+                - 本插件负责：禁言(GroupBan)、音乐卡片(SendMusicCard)、合并转发(SendForwardById/SendForwardNew)、消息ID查询(QGetMessages)、感知通知。
+                - QQ平台消息ID通常是负数（如 -1976879391），编造或猜ID必然失败（RetCode 100/1400）。
+                - 要撤回/贴表情/引用回复某条消息，必须先调用 qgetmessages 获取真实ID列表，从中选取。
+                - qgetmessages 仅返回实时捕获的真实消息ID（含自己刚发的消息），不使用历史接口。
+                - qgetmessages 返回格式：[消息ID:xxx] 即该消息的真实ID，直接原样使用。
+                """
+            : """
                 使用规则：
                 - QQ平台消息ID通常是负数（如 -1976879391），编造或猜ID必然失败（RetCode 100/1400）。
-                - 要撤回(deleteMsg)/贴表情(setemoji)/引用回复(CQ:reply)某条消息，必须先调用 qgetmessages 获取真实ID列表，从中选取。
+                - 要撤回(deleteMsg)/贴表情(setemoji)/引用回复(sendreplymessage)/转发合并转发(sendforwardbyid)某条消息，必须先调用 qgetmessages 获取真实ID列表，从中选取。
                 - qgetmessages 仅返回实时捕获的真实消息ID（含自己刚发的消息），不使用历史接口（历史接口ID语义不可靠，会误导操作）。
                 - qgetmessages 返回格式：[消息ID:xxx] 即该消息的真实ID，直接原样使用。
                 - 引用回复消息格式：[CQ:reply,id=真实ID]文本，id必须来自qgetmessages。
-                """
+                - 合并转发：sendforwardbyid 转发已有合并转发（id来自qgetmessages）；sendforwardnew 构造新合并转发（传JSON节点数组）。
+                - 戳一戳：pokegroupmember 群聊戳成员。
+                """;
+
+        XmlHandler xmlHandler = new(this) {
+            Description = "提供QQ贴表情、点赞、撤回、禁言、戳一戳、引用回复、合并转发、音乐卡片、消息ID查询等增强功能。⚠重要：QQ消息ID为负数，撤回/贴表情/引用回复/转发必须先用qgetmessages获取真实消息ID，严禁编造",
+            Explanation = explanation
         };
         functionCaller.RegisterHandler(xmlHandler, DocumentMode.Implicit, DestroyCancellationToken);
 
@@ -244,7 +315,8 @@ public class QQEnhanceModule(
         if (Configuration.PerceiveGroupBan || Configuration.PerceiveGroupIncrease)
             client.EventReceived += OnEventReceived;
 
-        if (Configuration.TypingIndicatorEnabled)
+        // 输入中状态：幼央接管时自动让位（避免双插件同时发 set_input_status）
+        if (Configuration.TypingIndicatorEnabled && !ShouldDelegate())
         {
             ChatBot.ChatSent += OnChatSent;
             ChatBot.ChatOver += OnChatOver;
@@ -285,6 +357,8 @@ public class QQEnhanceModule(
         [Description("消息ID（必须来自qgetmessages）")] long messageId,
         [Description("表情ID，201为点赞")] int emojiId)
     {
+        if (!Configuration.EmojiReactEnabled) { interactor.Poke("贴表情功能已禁用"); return; }
+        if (ShouldDelegate()) { interactor.Poke(DelegateHint("贴表情", "SendEmojiLike")); return; }
         OneBotClient? client = GetClient();
         if (client == null) { interactor.Poke("贴表情失败：QQ客户端不可用"); return; }
         try
@@ -304,6 +378,8 @@ public class QQEnhanceModule(
         [Description("QQ号")] long qq,
         [Description("点赞次数，默认50次")] int times = 50)
     {
+        if (!Configuration.SendLikesEnabled) { interactor.Poke("点赞功能已禁用"); return; }
+        if (ShouldDelegate()) { interactor.Poke(DelegateHint("点赞", "SendLike")); return; }
         OneBotClient? client = GetClient();
         if (client == null) { interactor.Poke("点赞失败：QQ客户端不可用"); return; }
         try
@@ -332,6 +408,8 @@ public class QQEnhanceModule(
     public async Task DeleteMsg(
         [Description("消息ID（必须来自qgetmessages）")] long messageId)
     {
+        if (!Configuration.DeleteMsgEnabled) { interactor.Poke("撤回功能已禁用"); return; }
+        if (ShouldDelegate()) { interactor.Poke(DelegateHint("撤回", "DeleteMessage")); return; }
         OneBotClient? client = GetClient();
         if (client == null) { interactor.Poke("撤回失败：QQ客户端不可用"); return; }
         try
@@ -352,6 +430,7 @@ public class QQEnhanceModule(
         [Description("QQ号")] long userId,
         [Description("禁言时长(秒)，默认600秒，0为解除禁言")] int duration = 600)
     {
+        if (!Configuration.GroupBanEnabled) { interactor.Poke("禁言功能已禁用"); return; }
         OneBotClient? client = GetClient();
         if (client == null) { interactor.Poke("禁言失败：QQ客户端不可用"); return; }
         try
@@ -366,6 +445,122 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
+    [Description("在群聊中戳一戳指定成员")]
+    public async Task PokeGroupMember(
+        [Description("群号")] long groupId,
+        [Description("QQ号")] long userId)
+    {
+        if (!Configuration.PokeEnabled) { interactor.Poke("戳一戳功能已禁用"); return; }
+        if (ShouldDelegate()) { interactor.Poke(DelegateHint("戳一戳", "PokeGroupMember")); return; }
+        OneBotClient? client = GetClient();
+        if (client == null) { interactor.Poke("戳一戳失败：QQ客户端不可用"); return; }
+        try
+        {
+            await client.CallActionAsync<object>("group_poke", new { group_id = groupId, user_id = userId });
+            interactor.Poke($"成功戳了戳 {userId}");
+        }
+        catch (Exception e)
+        {
+            interactor.Poke($"戳一戳失败：{e.Message}");
+        }
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("引用回复消息。replyToId必须来自qgetmessages的真实ID（可为负数），严禁编造。messageType为group时targetId传群号，private时传QQ号")]
+    public async Task SendReplyMessage(
+        [Description("回复内容")] string message,
+        [Description("被回复消息ID（必须来自qgetmessages）")] long replyToId,
+        [Description("消息类型：group或private")] string messageType = "group",
+        [Description("目标群号（group）或QQ号（private）")] long targetId = 0)
+    {
+        if (!Configuration.ReplyEnabled) { interactor.Poke("引用回复功能已禁用"); return; }
+        if (ShouldDelegate()) { interactor.Poke(DelegateHint("引用回复", "SendReplyMessage")); return; }
+        OneBotClient? client = GetClient();
+        if (client == null) { interactor.Poke("引用回复失败：QQ客户端不可用"); return; }
+        try
+        {
+            object @params;
+            if (messageType == "private" && targetId != 0)
+            {
+                @params = new { message_type = "private", user_id = targetId, message, reply = new { message_id = replyToId } };
+            }
+            else
+            {
+                @params = new { message_type = "group", group_id = targetId, message, reply = new { message_id = replyToId } };
+            }
+            await client.CallActionAsync<object>("send_msg", @params);
+            interactor.Poke("引用回复发送成功");
+        }
+        catch (Exception e)
+        {
+            interactor.Poke($"引用回复失败：{e.Message}");
+        }
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("转发一条已有的合并转发消息到群聊。forwardId为合并转发消息ID（必须来自qgetmessages，可为负数）")]
+    public async Task SendForwardById(
+        [Description("群号")] long groupId,
+        [Description("合并转发消息ID（必须来自qgetmessages）")] long forwardId)
+    {
+        if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
+        OneBotClient? client = GetClient();
+        if (client == null) { interactor.Poke("合并转发失败：QQ客户端不可用"); return; }
+        try
+        {
+            string message = $"[CQ:forward,id={forwardId}]";
+            await client.SendGroupMessage(groupId, message);
+            interactor.Poke("合并转发发送成功");
+        }
+        catch (Exception e)
+        {
+            interactor.Poke($"合并转发失败：{e.Message}");
+        }
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("构造并发送新的合并转发消息到群聊。nodesJson为JSON数组，每个节点两种格式：{\"name\":\"昵称\",\"uin\":QQ号,\"content\":\"内容\"}（自定义内容）或 {\"id\":真实消息ID}（引用真实消息，id必须来自qgetmessages）")]
+    public async Task SendForwardNew(
+        [Description("群号")] long groupId,
+        [Description("节点JSON数组")] string nodesJson)
+    {
+        if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
+        OneBotClient? client = GetClient();
+        if (client == null) { interactor.Poke("合并转发失败：QQ客户端不可用"); return; }
+        try
+        {
+            using var doc = JsonDocument.Parse(nodesJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                throw new Exception("nodesJson必须是JSON数组");
+
+            var nodes = new List<object>();
+            foreach (JsonElement node in doc.RootElement.EnumerateArray())
+            {
+                if (node.TryGetProperty("id", out var idElem) && idElem.ValueKind == JsonValueKind.Number)
+                {
+                    nodes.Add(new { type = "node", data = new { id = idElem.GetInt64() } });
+                }
+                else
+                {
+                    string name = node.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                    long uin = node.TryGetProperty("uin", out var u) && u.ValueKind == JsonValueKind.Number ? u.GetInt64() : 0;
+                    string content = node.TryGetProperty("content", out var c) ? c.GetString() ?? "" : "";
+                    nodes.Add(new { type = "node", data = new { name, uin, content } });
+                }
+            }
+            if (nodes.Count == 0)
+                throw new Exception("节点列表为空");
+
+            await client.CallActionAsync<object>("send_group_forward_msg", new { group_id = groupId, messages = nodes });
+            interactor.Poke("合并转发发送成功");
+        }
+        catch (Exception e)
+        {
+            interactor.Poke($"合并转发失败：{e.Message}");
+        }
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
     [Description("发送音乐卡片到QQ聊天")]
     public async Task SendMusicCard(
         [Description("目标QQ号(私聊)或群号(群聊)")] long targetId,
@@ -373,6 +568,7 @@ public class QQEnhanceModule(
         [Description("音乐平台(qq/163/kugou/migu/kuwo)")] string platform,
         [Description("音乐ID")] string musicId)
     {
+        if (!Configuration.MusicCardEnabled) { interactor.Poke("音乐卡片功能已禁用"); return; }
         OneBotClient? client = GetClient();
         if (client == null) { interactor.Poke("音乐卡片发送失败：QQ客户端不可用"); return; }
         try
@@ -391,7 +587,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("获取群聊/私聊最近消息及每条消息的消息ID，用于定位要撤回(DeleteMsg)或贴表情(SetEmoji)的消息。群聊传groupId；私聊传groupId=0并传userId。仅返回实时捕获的真实消息ID（含自己刚发的消息），捕获未启用或没有数据时返回提示")]
+    [Description("获取群聊/私聊最近消息及每条消息的消息ID，用于定位要撤回(DeleteMsg)、贴表情(SetEmoji)、引用回复(SendReplyMessage)或转发(SendForwardById)的消息。群聊传groupId；私聊传groupId=0并传userId。仅返回实时捕获的真实消息ID（含自己刚发的消息），捕获未启用或没有数据时返回提示")]
     public async Task QGetMessages(
         [Description("群号（私聊时传0）")] long groupId,
         [Description("QQ号（仅私聊时需要）")] long userId = 0,
@@ -421,7 +617,7 @@ public class QQEnhanceModule(
 
             StringBuilder sb = new();
             string target = groupId != 0 ? $"群 {groupId}" : $"与 {userId}";
-            sb.AppendLine($"{target} 最近 {cacheMatches.Count} 条消息（实时捕获，[消息ID:xxx]即真实ID，可能是负数，直接用于撤回/贴表情/引用回复）：");
+            sb.AppendLine($"{target} 最近 {cacheMatches.Count} 条消息（实时捕获，[消息ID:xxx]即真实ID，可能是负数，直接用于撤回/贴表情/引用回复/转发）：");
             foreach (var m in cacheMatches)
             {
                 string nick = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname;
