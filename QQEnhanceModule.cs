@@ -66,11 +66,11 @@ public class QQEnhanceConfig
     public double TypingMaxSeconds { get; set; } = 60.0;
 
     [DisplayName("实时消息捕获")]
-    [Description("独立WS监听实时事件捕获真实消息ID（撤回/贴表情可靠性核心，比历史接口更稳）")]
+    [Description("独立WS监听实时事件捕获真实消息ID（撤回/贴表情可靠性核心）")]
     public bool LiveCaptureEnabled { get; set; } = true;
 
     [DisplayName("实时消息缓存大小")]
-    [Description("缓存最近N条实时消息的消息ID/内容，用于qgetmessages优先查询")]
+    [Description("缓存最近N条实时消息的消息ID/内容，用于qgetmessages查询")]
     public int LiveCacheSize { get; set; } = 200;
 }
 
@@ -137,7 +137,7 @@ public class QQEnhanceModule(
         }
         catch (Exception e)
         {
-            logger.LogWarning(e, "QQ增强：实时消息捕获连接失败（不影响其他功能，qgetmessages将回退历史接口）");
+            logger.LogWarning(e, "QQ增强：实时消息捕获连接失败（qgetmessages将不可用，其他功能不受影响）");
         }
     }
 
@@ -227,7 +227,7 @@ public class QQEnhanceModule(
                 使用规则：
                 - QQ平台消息ID通常是负数（如 -1976879391），编造或猜ID必然失败（RetCode 100/1400）。
                 - 要撤回(deleteMsg)/贴表情(setemoji)/引用回复(CQ:reply)某条消息，必须先调用 qgetmessages 获取真实ID列表，从中选取。
-                - qgetmessages 优先使用实时捕获的真实消息ID（含自己刚发的消息），缓存不足时自动回退历史接口。
+                - qgetmessages 仅返回实时捕获的真实消息ID（含自己刚发的消息），不使用历史接口（历史接口ID语义不可靠，会误导操作）。
                 - qgetmessages 返回格式：[消息ID:xxx] 即该消息的真实ID，直接原样使用。
                 - 引用回复消息格式：[CQ:reply,id=真实ID]文本，id必须来自qgetmessages。
                 """
@@ -328,7 +328,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("撤回QQ消息。⚠：messageId必须用qgetmessages的获取真实ID，严禁编造")]
+    [Description("撤回QQ消息。⚠：messageId必须用qgetmessages取真实ID，严禁编造")]
     public async Task DeleteMsg(
         [Description("消息ID（必须来自qgetmessages）")] long messageId)
     {
@@ -391,7 +391,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("获取群聊/私聊最近消息及每条消息的消息ID，用于定位要撤回(DeleteMsg)或贴表情(SetEmoji)的消息。群聊传groupId；私聊传groupId=0并传userId。优先使用实时捕获的真实消息ID缓存，缓存不足时自动回退历史接口")]
+    [Description("获取群聊/私聊最近消息及每条消息的消息ID，用于定位要撤回(DeleteMsg)或贴表情(SetEmoji)的消息。群聊传groupId；私聊传groupId=0并传userId。仅返回实时捕获的真实消息ID（含自己刚发的消息），捕获未启用或没有数据时返回提示")]
     public async Task QGetMessages(
         [Description("群号（私聊时传0）")] long groupId,
         [Description("QQ号（仅私聊时需要）")] long userId = 0,
@@ -404,84 +404,31 @@ public class QQEnhanceModule(
             count = Math.Clamp(count, 1, 50);
             var lines = new List<string>();
 
-            // 优先从实时捕获缓存取（消息ID 100%真实，含自己刚发的消息）
+            // 仅从实时捕获缓存取（消息ID 100%真实，含自己刚发的消息）
             var cacheMatches = _liveMessages
                 .Where(m => groupId != 0 ? m.GroupId == groupId : (m.GroupId == 0 && (userId == 0 || m.UserId == userId)))
                 .OrderByDescending(m => m.Time)
                 .Take(count)
                 .ToList();
 
-            string cacheSource = "";
-            if (cacheMatches.Count > 0)
-            {
-                cacheSource = "（实时捕获）";
-                foreach (var m in cacheMatches)
-                {
-                    string nick = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname;
-                    string raw = OneBotSegment.FilterFace(OneBotSegment.FilterAt(OneBotSegment.FilterImage(OneBotSegment.FilterRecord(m.Raw))));
-                    DateTime time = DateTimeOffset.FromUnixTimeSeconds(m.Time).LocalDateTime;
-                    lines.Add($"[{time:HH:mm:ss}] {m.UserId}({nick}) [消息ID:{m.MessageId}] {raw}");
-                }
-            }
-
-            // 实时缓存未命中足够条数时，回退/补充历史接口
-            if (lines.Count < count && client != null)
-            {
-                int historyNeed = count - lines.Count;
-                string action = groupId != 0 ? "get_group_msg_history" : "get_friend_msg_history";
-                object prms = groupId != 0
-                    ? new { group_id = groupId, count = historyNeed }
-                    : new { user_id = userId, count = historyNeed };
-
-                try
-                {
-                    JsonElement? data = await client.CallActionAsync<JsonElement>(action, prms);
-                    if (data != null && data.Value.ValueKind == JsonValueKind.Array && data.Value.GetArrayLength() > 0)
-                    {
-                        if (lines.Count > 0) cacheSource = "（实时捕获+历史补充）";
-                        else cacheSource = "（历史接口）";
-                        foreach (JsonElement msg in data.Value.EnumerateArray())
-                        {
-                            long mid = 0;
-                            if (msg.TryGetProperty("message_id", out var m))
-                            {
-                                if (m.ValueKind == JsonValueKind.Number) mid = m.GetInt64();
-                                else if (m.ValueKind == JsonValueKind.String && long.TryParse(m.GetString(), out long parsed)) mid = parsed;
-                            }
-                            long uid = msg.TryGetProperty("user_id", out var u) && u.ValueKind == JsonValueKind.Number ? u.GetInt64() : 0;
-                            string nick = "";
-                            if (msg.TryGetProperty("sender", out var s) && s.ValueKind == JsonValueKind.Object &&
-                                s.TryGetProperty("nickname", out var n) && n.ValueKind == JsonValueKind.String)
-                                nick = n.GetString() ?? "";
-                            string raw = "";
-                            if (msg.TryGetProperty("raw_message", out var r) && r.ValueKind == JsonValueKind.String)
-                                raw = r.GetString() ?? "";
-                            else if (msg.TryGetProperty("message", out var m2) && m2.ValueKind == JsonValueKind.String)
-                                raw = m2.GetString() ?? "";
-                            long t = msg.TryGetProperty("time", out var tm) && tm.ValueKind == JsonValueKind.Number ? tm.GetInt64() : 0;
-                            DateTime time = DateTimeOffset.FromUnixTimeSeconds(t).LocalDateTime;
-                            raw = OneBotSegment.FilterFace(OneBotSegment.FilterAt(OneBotSegment.FilterImage(OneBotSegment.FilterRecord(raw))));
-                            lines.Add($"[{time:HH:mm:ss}] {uid}({nick}) [消息ID:{mid}] {raw}");
-                        }
-                    }
-                }
-                catch (Exception e)
-                {
-                    logger.LogDebug(e, "QQ增强：历史接口获取失败（已尝试实时缓存）");
-                }
-            }
-
-            if (lines.Count == 0)
+            if (cacheMatches.Count == 0)
             {
                 interactor.Poke(groupId != 0
-                    ? $"群 {groupId} 没有消息记录（实时捕获未启动或历史接口不支持，请确认已启用QQ聊天模块且OneBot支持get_group_msg_history）"
-                    : $"与 {userId} 没有消息记录（实时捕获未启动或历史接口不支持）");
+                    ? $"群 {groupId} 暂无实时捕获的消息记录（实时捕获连接后开始记录，请稍后重试；若持续为空请检查实时消息捕获配置与OneBot连接）"
+                    : $"与 {userId} 暂无实时捕获的消息记录（实时捕获连接后开始记录，请稍后重试）");
                 return;
             }
 
             StringBuilder sb = new();
             string target = groupId != 0 ? $"群 {groupId}" : $"与 {userId}";
-            sb.AppendLine($"{target} 最近 {lines.Count} 条消息{cacheSource}（[消息ID:xxx]即真实ID，可能是负数，直接用于撤回/贴表情/引用回复）：");
+            sb.AppendLine($"{target} 最近 {cacheMatches.Count} 条消息（实时捕获，[消息ID:xxx]即真实ID，可能是负数，直接用于撤回/贴表情/引用回复）：");
+            foreach (var m in cacheMatches)
+            {
+                string nick = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname;
+                string raw = OneBotSegment.FilterFace(OneBotSegment.FilterAt(OneBotSegment.FilterImage(OneBotSegment.FilterRecord(m.Raw))));
+                DateTime time = DateTimeOffset.FromUnixTimeSeconds(m.Time).LocalDateTime;
+                lines.Add($"[{time:HH:mm:ss}] {m.UserId}({nick}) [消息ID:{m.MessageId}] {raw}");
+            }
             foreach (string line in lines)
                 sb.AppendLine(line);
             interactor.Poke(sb.ToString());
