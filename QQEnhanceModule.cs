@@ -148,6 +148,36 @@ public class QQEnhanceModule(
         return $"{feature}功能由 YuYang.QQTools（幼央工具箱）接管，请调用幼央的 {yuYangFunction} 函数";
     }
 
+    // ==================== 统一 OneBot 调用（超时/失败友好提示） ====================
+
+    /// <summary>
+    /// 统一执行 OneBot Action，捕获超时（OneBotClient 内部 10s 超时）与异常。
+    /// 返回 null 表示成功；返回字符串为失败原因描述（含超时提示，避免 AI 重复操作）。
+    /// </summary>
+    private async Task<string?> CallActionSafeAsync(
+        string action,
+        object? @params,
+        string feature,
+        OneBotClient? client)
+    {
+        if (client == null)
+            return $"{feature}失败：QQ客户端不可用";
+        try
+        {
+            await client.CallActionAsync<object>(action, @params);
+            return null; // 成功
+        }
+        catch (TaskCanceledException)
+        {
+            // OneBotClient 内部 10s 超时：操作可能已在服务器生效，提示不要重复执行
+            return $"{feature}请求超时（10秒未收到响应）。操作可能已生效，请稍后用 qgetmessages 检查确认，不要重复操作";
+        }
+        catch (Exception e)
+        {
+            return $"{feature}失败：{e.Message}";
+        }
+    }
+
     // Typing indicator 状态管理
     private readonly Dictionary<long, CancellationTokenSource> _typingCts = new();
     private readonly object _typingLock = new();
@@ -162,11 +192,13 @@ public class QQEnhanceModule(
         public string Raw { get; init; } = "";
         public long Time { get; init; }
         public bool IsSelf { get; init; }
+        public long Seq { get; init; }
     }
 
     private ClientWebSocket? _liveWs;
     private CancellationTokenSource? _liveCts;
     private long _liveBotId;
+    private long _liveSeq;
     private readonly ConcurrentQueue<LiveMessage> _liveMessages = new();
 
     private async Task StartLiveCaptureAsync(OneBotClient client)
@@ -242,11 +274,40 @@ public class QQEnhanceModule(
                     if (root.TryGetProperty("sender", out var se) && se.ValueKind == JsonValueKind.Object &&
                         se.TryGetProperty("nickname", out var ne) && ne.ValueKind == JsonValueKind.String)
                         nickname = ne.GetString() ?? "";
-                    string raw = root.TryGetProperty("raw_message", out var re) && re.ValueKind == JsonValueKind.String
-                        ? re.GetString() ?? ""
-                        : (root.TryGetProperty("message", out var me) && me.ValueKind == JsonValueKind.String ? me.GetString() ?? "" : "");
 
-                    _liveMessages.Enqueue(new LiveMessage { MessageId = msgId, UserId = userId, GroupId = groupId, Nickname = nickname, Raw = raw, Time = time, IsSelf = isSelf });
+                    // raw_message 优先；缺失时 message 为字符串直接取，为数组时拼接 text/at 段
+                    string raw = "";
+                    if (root.TryGetProperty("raw_message", out var re) && re.ValueKind == JsonValueKind.String)
+                    {
+                        raw = re.GetString() ?? "";
+                    }
+                    else if (root.TryGetProperty("message", out var me))
+                    {
+                        if (me.ValueKind == JsonValueKind.String)
+                            raw = me.GetString() ?? "";
+                        else if (me.ValueKind == JsonValueKind.Array)
+                        {
+                            var parts = new List<string>();
+                            foreach (JsonElement seg in me.EnumerateArray())
+                            {
+                                if (seg.ValueKind != JsonValueKind.Object) continue;
+                                if (!seg.TryGetProperty("type", out var segType)) continue;
+                                string type = segType.GetString() ?? "";
+                                if (!seg.TryGetProperty("data", out var segData) || segData.ValueKind != JsonValueKind.Object)
+                                    continue;
+                                if (type == "text" && segData.TryGetProperty("text", out var txt) && txt.ValueKind == JsonValueKind.String)
+                                    parts.Add(txt.GetString() ?? "");
+                                else if (type == "at" && segData.TryGetProperty("qq", out var qq) && qq.ValueKind == JsonValueKind.String)
+                                    parts.Add($"[CQ:at,qq={qq.GetString()}]");
+                            }
+                            raw = string.Join("", parts);
+                        }
+                    }
+
+                    _liveMessages.Enqueue(new LiveMessage {
+                        MessageId = msgId, UserId = userId, GroupId = groupId, Nickname = nickname,
+                        Raw = raw, Time = time, IsSelf = isSelf, Seq = Interlocked.Increment(ref _liveSeq)
+                    });
                     int max = Math.Max(1, Configuration.LiveCacheSize);
                     while (_liveMessages.Count > max)
                         _liveMessages.TryDequeue(out _);
@@ -288,19 +349,20 @@ public class QQEnhanceModule(
                 - qgetmessages 仅返回实时捕获的真实消息ID（含自己刚发的消息），不使用历史接口。
                 - qgetmessages 返回格式：[消息ID:xxx] 即该消息的真实ID，直接原样使用。
                 """
-            : """
+            : $$"""
                 使用规则：
                 - QQ平台消息ID通常是负数（如 -1976879391），编造或猜ID必然失败（RetCode 100/1400）。
                 - 要撤回(deleteMsg)/贴表情(setemoji)/引用回复(sendreplymessage)/转发合并转发(sendforwardbyid)某条消息，必须先调用 qgetmessages 获取真实ID列表，从中选取。
                 - qgetmessages 仅返回实时捕获的真实消息ID（含自己刚发的消息），不使用历史接口（历史接口ID语义不可靠，会误导操作）。
                 - qgetmessages 返回格式：[消息ID:xxx] 即该消息的真实ID，直接原样使用。
-                - 引用回复消息格式：[CQ:reply,id=真实ID]文本，id必须来自qgetmessages。
+                - 引用回复消息格式：sendreplymessage message="内容" replytoid="真实ID" messagetype="group" targetid="群号或QQ号"。
                 - 合并转发：sendforwardbyid 转发已有合并转发（id来自qgetmessages）；sendforwardnew 构造新合并转发（传JSON节点数组）。
-                - 戳一戳：pokegroupmember 群聊戳成员。
+                - 戳一戳：pokegroupmember 群聊戳成员；pokeprivatemember 私聊戳用户（QQ号）。
+                - 音乐卡片：sendmusiccard（QQ平台音乐卡片请求可能较慢，若提示超时请稍后用qgetmessages确认是否发出，不要重复发送）。
                 """;
 
         XmlHandler xmlHandler = new(this) {
-            Description = "提供QQ贴表情、点赞、撤回、禁言、戳一戳、引用回复、合并转发、音乐卡片、消息ID查询等增强功能。⚠重要：QQ消息ID为负数，撤回/贴表情/引用回复/转发必须先用qgetmessages获取真实消息ID，严禁编造",
+            Description = "提供QQ贴表情、点赞、撤回、禁言、戳一戳、引用回复、合并转发、音乐卡片、消息ID查询等增强功能。⚠重要：QQ消息ID为负数，撤回/贴表情/引用回复/转发必须先用getmessages获取真实消息ID，严禁编造",
             Explanation = explanation
         };
         functionCaller.RegisterHandler(xmlHandler, DocumentMode.Implicit, DestroyCancellationToken);
@@ -360,19 +422,11 @@ public class QQEnhanceModule(
         if (!Configuration.EmojiReactEnabled) { interactor.Poke("贴表情功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("贴表情", "SendEmojiLike")); return; }
         OneBotClient? client = GetClient();
-        if (client == null) { interactor.Poke("贴表情失败：QQ客户端不可用"); return; }
-        try
-        {
-            await client.CallActionAsync<object>("set_msg_emoji_like", new { message_id = messageId, emoji_id = emojiId });
-            interactor.Poke("贴表情成功");
-        }
-        catch (Exception e)
-        {
-            interactor.Poke($"贴表情失败：{e.Message}");
-        }
+        string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = messageId, emoji_id = emojiId }, "贴表情", client);
+        interactor.Poke(err ?? "贴表情成功");
     }
 
-    [XmlFunction(FunctionMode.OneShot)]
+    [XmlMessage(FunctionMode.OneShot)]
     [Description("给QQ用户资料卡点赞")]
     public async Task SendQQLikes(
         [Description("QQ号")] long qq,
@@ -391,9 +445,13 @@ public class QQEnhanceModule(
             int count = 0;
             foreach (int chunk in chunks)
             {
-                await client.CallActionAsync<object>("send_like", new { user_id = qq, times = chunk });
+                string? err = await CallActionSafeAsync("send_like", new { user_id = qq, times = chunk }, "点赞", client);
+                if (err != null)
+                {
+                    interactor.Poke($"{err}（已成功 {count} 个赞）");
+                    return;
+                }
                 count += chunk;
-                await Task.Delay(100);
             }
             interactor.Poke($"点赞成功，点了 {count} 个赞");
         }
@@ -403,7 +461,7 @@ public class QQEnhanceModule(
         }
     }
 
-    [XmlFunction(FunctionMode.OneShot)]
+    [XmlMessage(FunctionMode.OneShot)]
     [Description("撤回QQ消息。⚠：messageId必须用qgetmessages取真实ID，严禁编造")]
     public async Task DeleteMsg(
         [Description("消息ID（必须来自qgetmessages）")] long messageId)
@@ -411,19 +469,11 @@ public class QQEnhanceModule(
         if (!Configuration.DeleteMsgEnabled) { interactor.Poke("撤回功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("撤回", "DeleteMessage")); return; }
         OneBotClient? client = GetClient();
-        if (client == null) { interactor.Poke("撤回失败：QQ客户端不可用"); return; }
-        try
-        {
-            await client.CallActionAsync<object>("delete_msg", new { message_id = messageId });
-            interactor.Poke("撤回成功");
-        }
-        catch (Exception e)
-        {
-            interactor.Poke($"撤回失败：{e.Message}");
-        }
+        string? err = await CallActionSafeAsync("delete_msg", new { message_id = messageId }, "撤回", client);
+        interactor.Poke(err ?? "撤回成功");
     }
 
-    [XmlFunction(FunctionMode.OneShot)]
+    [XmlMessage(FunctionMode.OneShot)]
     [Description("禁言QQ群成员。群号可从群消息标签[群聊消息(群号,群名)]中获取")]
     public async Task GroupBan(
         [Description("群号")] long groupId,
@@ -432,19 +482,11 @@ public class QQEnhanceModule(
     {
         if (!Configuration.GroupBanEnabled) { interactor.Poke("禁言功能已禁用"); return; }
         OneBotClient? client = GetClient();
-        if (client == null) { interactor.Poke("禁言失败：QQ客户端不可用"); return; }
-        try
-        {
-            await client.CallActionAsync<object>("set_group_ban", new { group_id = groupId, user_id = userId, duration });
-            interactor.Poke("禁言成功");
-        }
-        catch (Exception e)
-        {
-            interactor.Poke($"禁言失败：{e.Message}");
-        }
+        string? err = await CallActionSafeAsync("set_group_ban", new { group_id = groupId, user_id = userId, duration }, "禁言", client);
+        interactor.Poke(err ?? "禁言成功");
     }
 
-    [XmlFunction(FunctionMode.OneShot)]
+    [XmlMessage(FunctionMode.OneShot)]
     [Description("在群聊中戳一戳指定成员")]
     public async Task PokeGroupMember(
         [Description("群号")] long groupId,
@@ -453,20 +495,23 @@ public class QQEnhanceModule(
         if (!Configuration.PokeEnabled) { interactor.Poke("戳一戳功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("戳一戳", "PokeGroupMember")); return; }
         OneBotClient? client = GetClient();
-        if (client == null) { interactor.Poke("戳一戳失败：QQ客户端不可用"); return; }
-        try
-        {
-            await client.CallActionAsync<object>("group_poke", new { group_id = groupId, user_id = userId });
-            interactor.Poke($"成功戳了戳 {userId}");
-        }
-        catch (Exception e)
-        {
-            interactor.Poke($"戳一戳失败：{e.Message}");
-        }
+        string? err = await CallActionSafeAsync("group_poke", new { group_id = groupId, user_id = userId }, "戳一戳", client);
+        interactor.Poke(err ?? $"成功戳了戳 {userId}");
     }
 
-    [XmlFunction(FunctionMode.OneShot)]
-    [Description("引用回复消息。replyToId必须来自qgetmessages的真实ID（可为负数），严禁编造。messageType为group时targetId传群号，private时传QQ号")]
+    [XmlMessage(FunctionMode.OneShot)]
+    [Description("在私聊中戳一戳指定用户（friend_poke，NapCat/LLOneBot 支持）")]
+    public async Task PokePrivateMember(
+        [Description("QQ号")] long userId)
+    {
+        if (!Configuration.PokeEnabled) { interactor.Poke("戳一戳功能已禁用"); return; }
+        OneBotClient? client = GetClient();
+        string? err = await CallActionSafeAsync("friend_poke", new { user_id = userId }, "私聊戳一戳", client);
+        interactor.Poke(err ?? $"成功私聊戳了戳 {userId}");
+    }
+
+    [XmlMessage(FunctionMode.OneShot)]
+    [Description("引用回复消息。replyToId必须来自qgetmessages的真实ID（可为负数），严禁编造。messageType为group时targetId传群号，private时传QQ号。先尝试结构化reply参数，失败自动回退CQ码")]
     public async Task SendReplyMessage(
         [Description("回复内容")] string message,
         [Description("被回复消息ID（必须来自qgetmessages）")] long replyToId,
@@ -491,13 +536,30 @@ public class QQEnhanceModule(
             await client.CallActionAsync<object>("send_msg", @params);
             interactor.Poke("引用回复发送成功");
         }
+        catch (TaskCanceledException)
+        {
+            interactor.Poke("引用回复请求超时（10秒），可能已发送成功，请确认后不要再重复发送");
+        }
         catch (Exception e)
         {
-            interactor.Poke($"引用回复失败：{e.Message}");
+            // 结构化 reply 参数不被当前实现支持时，回退 CQ 码方式
+            try
+            {
+                string fallback = $"[CQ:reply,id={replyToId}] {message}";
+                if (messageType == "private" && targetId != 0)
+                    await client.SendPrivateMessage(targetId, fallback);
+                else
+                    await client.SendGroupMessage(targetId, fallback);
+                interactor.Poke($"引用回复发送成功（CQ码方式，结构化参数不可用：{e.Message}）");
+            }
+            catch (Exception e2)
+            {
+                interactor.Poke($"引用回复失败：结构化参数失败（{e.Message}），CQ码回退也失败（{e2.Message}）");
+            }
         }
     }
 
-    [XmlFunction(FunctionMode.OneShot)]
+    [XmlMessage(FunctionMode.OneShot)]
     [Description("转发一条已有的合并转发消息到群聊。forwardId为合并转发消息ID（必须来自qgetmessages，可为负数）")]
     public async Task SendForwardById(
         [Description("群号")] long groupId,
@@ -512,13 +574,17 @@ public class QQEnhanceModule(
             await client.SendGroupMessage(groupId, message);
             interactor.Poke("合并转发发送成功");
         }
+        catch (TaskCanceledException)
+        {
+            interactor.Poke("合并转发请求超时（10秒），可能已发送成功，请稍后确认，不要重复发送");
+        }
         catch (Exception e)
         {
             interactor.Poke($"合并转发失败：{e.Message}");
         }
     }
 
-    [XmlFunction(FunctionMode.OneShot)]
+    [XmlMessage(FunctionMode.OneShot)]
     [Description("构造并发送新的合并转发消息到群聊。nodesJson为JSON数组，每个节点两种格式：{\"name\":\"昵称\",\"uin\":QQ号,\"content\":\"内容\"}（自定义内容）或 {\"id\":真实消息ID}（引用真实消息，id必须来自qgetmessages）")]
     public async Task SendForwardNew(
         [Description("群号")] long groupId,
@@ -554,14 +620,18 @@ public class QQEnhanceModule(
             await client.CallActionAsync<object>("send_group_forward_msg", new { group_id = groupId, messages = nodes });
             interactor.Poke("合并转发发送成功");
         }
+        catch (TaskCanceledException)
+        {
+            interactor.Poke("合并转发请求超时（10秒），可能已发送成功。请稍后确认，不要重复发送");
+        }
         catch (Exception e)
         {
             interactor.Poke($"合并转发失败：{e.Message}");
         }
     }
 
-    [XmlFunction(FunctionMode.OneShot)]
-    [Description("发送音乐卡片到QQ聊天")]
+    [XmlMessage(FunctionMode.OneShot)]
+    [Description("发送音乐卡片到QQ聊天。⚠QQ平台音乐卡片请求可能较慢（>10秒），超时请稍后用qgetmessages确认是否已发出，不要重复发送")]
     public async Task SendMusicCard(
         [Description("目标QQ号(私聊)或群号(群聊)")] long targetId,
         [Description("消息类型：private或group")] string type,
@@ -580,15 +650,19 @@ public class QQEnhanceModule(
                 await client.SendPrivateMessage(targetId, message);
             interactor.Poke("音乐卡片发送成功");
         }
+        catch (TaskCanceledException)
+        {
+            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。QQ服务器可能仍在后台处理，卡片可能稍后出现；请用qgetmessages确认，不要重复发送。若持续超时请检查musicId是否有效");
+        }
         catch (Exception e)
         {
             interactor.Poke($"音乐卡片发送失败：{e.Message}");
         }
     }
 
-    [XmlFunction(FunctionMode.OneShot)]
-    [Description("获取群聊/私聊最近消息及每条消息的消息ID，用于定位要撤回(DeleteMsg)、贴表情(SetEmoji)、引用回复(SendReplyMessage)或转发(SendForwardById)的消息。群聊传groupId；私聊传groupId=0并传userId。仅返回实时捕获的真实消息ID（含自己刚发的消息），捕获未启用或没有数据时返回提示")]
-    public async Task QGetMessages(
+    [XmlMessage(FunctionMode.OneShot)]
+    [Description("获取群聊/私聊最近消息及每条消息ID，用于定位要撤回/贴表情/引用回复/转发的目标。群聊传groupId，私聊传groupId=0并传userId。仅返回实时捕获的真实消息ID（含自己刚发的消息），无数据时返回提示")]
+    public async Task GetMessages(
         [Description("群号（私聊时传0）")] long groupId,
         [Description("QQ号（仅私聊时需要）")] long userId = 0,
         [Description("获取条数，1-50，默认10")] int count = 10)
@@ -600,10 +674,10 @@ public class QQEnhanceModule(
             count = Math.Clamp(count, 1, 50);
             var lines = new List<string>();
 
-            // 仅从实时捕获缓存取（消息ID 100%真实，含自己刚发的消息）
             var cacheMatches = _liveMessages
                 .Where(m => groupId != 0 ? m.GroupId == groupId : (m.GroupId == 0 && (userId == 0 || m.UserId == userId)))
                 .OrderByDescending(m => m.Time)
+                .ThenByDescending(m => m.Seq)
                 .Take(count)
                 .ToList();
 
@@ -692,7 +766,6 @@ public class QQEnhanceModule(
 
     private async Task<string> GetGroupNameAsync(long groupId)
     {
-        // 优先从 QChatService 的群状态缓存拿群名（群里有消息活动时已有）
         if (qChatService.GroupStates.TryGetValue(groupId, out var state) && !string.IsNullOrEmpty(state.Name))
             return state.Name!;
 
@@ -705,7 +778,7 @@ public class QQEnhanceModule(
         }
         catch (Exception e)
         {
-            logger.LogWarning(e, "获取群名失败: {GroupId}", groupId);
+            logger.LogWarning("获取群名失败: {GroupId}", groupId);
             return "";
         }
     }
@@ -735,7 +808,7 @@ public class QQEnhanceModule(
         }
         catch (Exception e)
         {
-            logger.LogWarning(e, "获取QQ用户名失败: {UserId}", userId);
+            logger.LogWarning("获取QQ用户名失败: {UserId}", userId);
             return "";
         }
     }
