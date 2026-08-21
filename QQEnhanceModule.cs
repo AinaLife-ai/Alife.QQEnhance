@@ -42,6 +42,10 @@ public class QQEnhanceConfig
     [Description("启用发送音乐卡片功能")]
     public bool MusicCardEnabled { get; set; } = false;
 
+    [DisplayName("音乐卡片样式")]
+    [Description("json=QQ原生分享卡片（com.tencent.structmsg，无需签名，NapCat任何版本可渲染，推荐）；custom=自定义音乐段（依赖NapCat musicSignUrl签名，签名失效时接收方显示\"发送者版本过低\"）；auto=优先custom，发送异常自动降级json")]
+    public string MusicCardStyle { get; set; } = "json";
+
     [DisplayName("戳一戳")]
     [Description("启用群聊戳一戳成员功能")]
     public bool PokeEnabled { get; set; } = true;
@@ -592,7 +596,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("转发指定群聊最近N条消息为合并转发消息。无需传消息ID，插件自动从实时缓存取真实消息（含bot自己发的消息，发送时自动记录；纯图片/语音段自动跳过）。count超过缓存可用数时按可用数转")]
+    [Description("转发指定群聊最近N条消息为合并转发消息。无需传消息ID，插件自动从实时缓存取真实消息ID引用节点（含bot自己发的消息，发送时自动记录），图片/语音/表情等富媒体原样真实转发。count超过缓存可用数时按可用数转")]
     public async Task ForwardRecent(
         [Description("群号")] long groupId,
         [Description("转发条数，1-50，默认5")] int count = 5)
@@ -618,19 +622,11 @@ public class QQEnhanceModule(
             return;
         }
 
+        // 用真实消息ID引用节点：图片/语音/表情/转发等富媒体原样保留（真实转发，而非文本伪造）
         var nodes = new List<object>();
         foreach (var m in matches)
         {
-            string content = OneBotSegment.FilterFace(OneBotSegment.FilterAt(OneBotSegment.FilterImage(OneBotSegment.FilterRecord(m.Raw))));
-            if (string.IsNullOrWhiteSpace(content)) continue;
-            string name = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname;
-            nodes.Add(new { type = "node", data = new { name, uin = m.UserId, content } });
-        }
-
-        if (nodes.Count == 0)
-        {
-            interactor.Poke("缓存中的消息无可转发文本内容（可能是纯图片/语音），请稍后重试");
-            return;
+            nodes.Add(new { type = "node", data = new { id = m.MessageId } });
         }
 
         try
@@ -639,7 +635,7 @@ public class QQEnhanceModule(
             long sentId = ExtractSentId(sent);
             if (sentId != 0)
                 RecordSentMessage(sentId, groupId, 0, $"[CQ:forward,id={sentId}]", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-            interactor.Poke($"合并转发发送成功（{nodes.Count} 个节点）");
+            interactor.Poke($"合并转发发送成功（{nodes.Count} 个节点，真实消息引用）");
         }
         catch (TaskCanceledException)
         {
@@ -865,7 +861,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("发送音乐卡片到QQ聊天。推荐用法：platform=search，musicId传歌曲关键词（如 晴天 周杰伦），自动搜索并拿直链，custom卡片格式兼容NapCat。旧用法：platform=qq/163 + musicId按ID发送（内部转custom，163走vkeys直链，qq等平台直链需登录态可能失败，失败会提示改用搜索）。⚠QQ平台音乐卡片请求可能较慢（>10秒），若提示超时请稍后用getmessages确认是否已发出，不要重复发送")]
+    [Description("发送音乐卡片到QQ聊天。推荐用法：platform=search，musicId传歌曲关键词（如 晴天 周杰伦），自动搜索并拿直链。默认使用QQ原生分享卡片（json格式，无需签名，任何NapCat版本可渲染，接收方不会出现\"发送者版本过低\"）；配置MusicCardStyle=custom时改用自定义音乐段（依赖NapCat签名，签名失效会显示\"发送者版本过低\"）。旧用法：platform=qq/163 + musicId按ID发送（163走vkeys直链，qq等平台直链需登录态可能失败，失败会提示改用搜索）。⚠QQ平台音乐卡片请求可能较慢（>10秒），若提示超时请稍后用getmessages确认是否已发出，不要重复发送")]
     public async Task SendMusicCard(
         [Description("目标QQ号(私聊)或群号(群聊)")] long targetId,
         [Description("消息类型：private或group")] string type,
@@ -882,7 +878,9 @@ public class QQEnhanceModule(
             {
                 var song = await SearchSongAsync(musicId);
                 if (song == null) { interactor.Poke($"未找到歌曲：{musicId}"); return; }
-                message = BuildCustomMusicCq(song.Url, song.Title, song.Content, song.Cover);
+                message = Configuration.MusicCardStyle == "custom"
+                    ? BuildCustomMusicCq(song.Url, song.Title, song.Content, song.Cover)
+                    : BuildJsonMusicCq(song.Url, song.Url, song.Title, song.Content, song.Cover, song.JumpUrl);
             }
             else
             {
@@ -892,7 +890,9 @@ public class QQEnhanceModule(
                     interactor.Poke($"无法获取 {platform} 音乐直链（{musicId}），请改用 SendMusicCard platform=search musicId=歌名 搜索发送");
                     return;
                 }
-                message = BuildCustomMusicCq(url, musicId, platform, "");
+                message = Configuration.MusicCardStyle == "custom"
+                    ? BuildCustomMusicCq(url, musicId, platform, "")
+                    : BuildJsonMusicCq(url, url, musicId, platform, "", "");
             }
             SendResult? sent;
             if (type == "group")
@@ -918,7 +918,7 @@ public class QQEnhanceModule(
 
     private static readonly HttpClient _http = new HttpClient { Timeout = TimeSpan.FromSeconds(12) };
 
-    private sealed record SongInfo(string Url, string Title, string Content, string Cover);
+    private sealed record SongInfo(string Url, string Title, string Content, string Cover, string JumpUrl);
 
     /// <summary>CQ码转义（custom音乐卡片的url/title等字段含特殊字符必须转义）</summary>
     private static string CqEscape(string s) =>
@@ -936,10 +936,64 @@ public class QQEnhanceModule(
         return sb.ToString();
     }
 
+    /// <summary>构造 QQ 原生分享卡片 CQ 码（com.tencent.structmsg，无需签名，NapCat 任何版本可渲染，接收方不会出现"发送者版本过低"）</summary>
+    private static string BuildJsonMusicCq(string url, string audio, string title, string content, string cover, string jumpUrl)
+    {
+        long ctime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        string token = Guid.NewGuid().ToString("N");
+        string jump = string.IsNullOrEmpty(jumpUrl) ? url : jumpUrl;
+        string preview = string.IsNullOrEmpty(cover) ? "" : cover;
+        string desc = string.IsNullOrEmpty(content) ? title : content;
+
+        var meta = new Dictionary<string, object>
+        {
+            ["music"] = new Dictionary<string, object>
+            {
+                ["app_type"] = 1,
+                ["appid"] = 100495085,
+                ["ctime"] = ctime,
+                ["desc"] = desc,
+                ["jumpUrl"] = jump,
+                ["musicUrl"] = audio,
+                ["preview"] = preview,
+                ["sourceMsgId"] = "0",
+                ["source_icon"] = "",
+                ["source_url"] = "",
+                ["tag"] = "网易云音乐",
+                ["title"] = title
+            }
+        };
+        var payload = new Dictionary<string, object>
+        {
+            ["app"] = "com.tencent.structmsg",
+            ["config"] = new Dictionary<string, object>
+            {
+                ["autosize"] = true,
+                ["ctime"] = ctime,
+                ["forward"] = true,
+                ["token"] = token,
+                ["type"] = "normal"
+            },
+            ["desc"] = "音乐",
+            ["extra"] = new Dictionary<string, object>
+            {
+                ["app_type"] = 1,
+                ["appid"] = 100495085,
+                ["uin"] = 0
+            },
+            ["meta"] = meta,
+            ["prompt"] = $"[分享]{title}",
+            ["ver"] = "0.0.0.1",
+            ["view"] = "music"
+        };
+        string json = JsonSerializer.Serialize(payload);
+        return $"[CQ:json,data={CqEscape(json)}]";
+    }
+
     /// <summary>关键词搜索歌曲：优先波点音乐（小尘API，直链稳定），兜底网易云搜索+vkeys直链</summary>
     private static async Task<SongInfo?> SearchSongAsync(string keyword)
     {
-        // 1. 波点音乐（小尘API）
+        // 1. 波点音乐（小尘API，直链稳定）
         try
         {
             string url = "https://api.xcvts.cn/api/music/bdyy?msg=" + Uri.EscapeDataString(keyword) + "&n=1&type=json&br=320kmp3";
@@ -954,13 +1008,48 @@ public class QQEnhanceModule(
                     string name = data.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
                     string artist = data.TryGetProperty("artist", out var a) ? a.GetString() ?? "" : "";
                     string cover = data.TryGetProperty("cover", out var cv) ? cv.GetString() ?? "" : "";
-                    return new SongInfo(playUrl, name, artist, cover);
+                    string detail = data.TryGetProperty("detail_page", out var dp) ? dp.GetString() ?? "" : "";
+                    return new SongInfo(playUrl, name, artist, cover, detail);
                 }
             }
         }
         catch { }
 
-        // 2. 网易云搜索 + vkeys 直链
+        // 2. 网易云搜索（meting API，NCM-Downloader 同源）+ vkeys 直链
+        try
+        {
+            string searchUrl = "https://api.qijieya.cn/meting/?type=search&id=" + Uri.EscapeDataString(keyword) + "&limit=1";
+            using var resp = await _http.GetAsync(searchUrl);
+            if (resp.IsSuccessStatusCode)
+            {
+                using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
+                {
+                    var song = doc.RootElement[0];
+                    string name = song.TryGetProperty("name", out var nm) ? nm.GetString() ?? "" : "";
+                    string artist = song.TryGetProperty("artist", out var ar) ? ar.GetString() ?? "" : "";
+                    string pic = song.TryGetProperty("pic", out var pc) ? pc.GetString() ?? "" : "";
+                    string urlField = song.TryGetProperty("url", out var uf) ? uf.GetString() ?? "" : "";
+                    long id = 0;
+                    var idMatch = Regex.Match(urlField, @"[?&]id=(\d+)");
+                    if (idMatch.Success) long.TryParse(idMatch.Groups[1].Value, out id);
+                    if (id == 0)
+                    {
+                        var idMatch2 = Regex.Match(urlField, @"id=(\d+)");
+                        if (idMatch2.Success) long.TryParse(idMatch2.Groups[1].Value, out id);
+                    }
+                    if (id != 0)
+                    {
+                        string? playUrl = await ResolveNcmUrlAsync(id);
+                        if (!string.IsNullOrEmpty(playUrl))
+                            return new SongInfo(playUrl, name, artist, pic, $"https://music.163.com/song?id={id}");
+                    }
+                }
+            }
+        }
+        catch { }
+
+        // 3. 网易云官方搜索（兜底）+ vkeys 直链
         try
         {
             string searchUrl = "https://music.163.com/api/search/get/web?s=" + Uri.EscapeDataString(keyword) + "&type=1&limit=1&offset=0";
@@ -984,7 +1073,7 @@ public class QQEnhanceModule(
                         cover = pic.GetString() ?? "";
                     string? playUrl = await ResolveNcmUrlAsync(id);
                     if (!string.IsNullOrEmpty(playUrl))
-                        return new SongInfo(playUrl, name, artist, cover);
+                        return new SongInfo(playUrl, name, artist, cover, $"https://music.163.com/song?id={id}");
                 }
             }
         }
@@ -992,7 +1081,7 @@ public class QQEnhanceModule(
         return null;
     }
 
-    /// <summary>网易云歌曲ID → 直链（vkeys API）</summary>
+    /// <summary>网易云歌曲ID → 直链（vkeys API，NCM-Downloader 同源）</summary>
     private static async Task<string?> ResolveNcmUrlAsync(long id)
     {
         try
