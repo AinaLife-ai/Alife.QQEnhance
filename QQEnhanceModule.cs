@@ -358,7 +358,7 @@ public class QQEnhanceModule(
                 - qgetmessages 仅返回实时捕获的真实消息ID（含自己刚发的消息），不使用历史接口（历史接口ID语义不可靠，会误导操作）。
                 - qgetmessages 返回格式：[消息ID:xxx] 即该消息的真实ID，直接原样使用。
                 - 引用回复消息格式：sendreplymessage message="内容" replytoid="真实ID" messagetype="group" targetid="群号或QQ号"。
-                - 合并转发：sendforwardbyid 转发已有合并转发（id来自qgetmessages）；sendforwardnew 构造新合并转发（传JSON节点数组）。
+                - 合并转发：sendforwardbyid 转发已有合并转发（id来自qgetmessages）；sendforwardnew 构造新合并转发（传JSON数组，节点格式 [{"name":"昵称","uin":QQ号,"content":"内容"},{"id":真实消息ID}]，必须完整闭合括号）。
                 - 戳一戳：pokegroupmember 群聊戳成员；pokeprivatemember 私聊戳用户（QQ号）。
                 - 音乐卡片：sendmusiccard（QQ平台音乐卡片请求可能较慢，若提示超时请稍后用qgetmessages确认是否发出，不要重复发送）。
                 """;
@@ -587,31 +587,57 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("构造并发送新的合并转发消息到群聊。nodesJson为JSON数组，每个节点两种格式：{\"name\":\"昵称\",\"uin\":QQ号,\"content\":\"内容\"}（自定义内容）或 {\"id\":真实消息ID}（引用真实消息，id必须来自getmessages）")]
+    [Description("构造并发送新的合并转发消息到群聊。nodesJson为JSON数组，每个节点两种格式：{\"name\":\"昵称\",\"uin\":QQ号,\"content\":\"内容\"}（自定义内容）或 {\"id\":真实消息ID}（引用真实消息，id必须来自getmessages，数字或数字字符串均可）。⚠必须传完整合法的JSON数组，最外层用方括号[]包裹，不要漏收尾括号")]
     public async Task SendForwardNew(
         [Description("群号")] long groupId,
-        [Description("节点JSON数组")] string nodesJson)
+        [Description("节点JSON数组（必须是完整合法的JSON，[]闭合）")] string nodesJson)
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
         OneBotClient? client = GetClient();
         if (client == null) { interactor.Poke("合并转发失败：QQ客户端不可用"); return; }
         try
         {
-            using var doc = JsonDocument.Parse(nodesJson);
-            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+            // 容错：去掉首尾多余空白；若因AI漏了收尾括号，尝试补全（最多补一层 ] 和 }）
+            string json = nodesJson.Trim();
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                    throw new Exception("nodesJson必须是JSON数组");
+            }
+            catch (JsonException)
+            {
+                string? repaired = RepairJsonArray(json);
+                if (repaired == null)
+                    throw new JsonException("nodesJson不是合法JSON数组（检查是否漏了收尾括号或引号未闭合）。正确示例：[{\"name\":\"昵称\",\"uin\":123456,\"content\":\"内容\"},{\"id\":-1234567890}]");
+                json = repaired;
+            }
+
+            using var doc2 = JsonDocument.Parse(json);
+            if (doc2.RootElement.ValueKind != JsonValueKind.Array)
                 throw new Exception("nodesJson必须是JSON数组");
 
             var nodes = new List<object>();
-            foreach (JsonElement node in doc.RootElement.EnumerateArray())
+            foreach (JsonElement node in doc2.RootElement.EnumerateArray())
             {
-                if (node.TryGetProperty("id", out var idElem) && idElem.ValueKind == JsonValueKind.Number)
+                if (node.ValueKind != JsonValueKind.Object)
+                    throw new Exception("每个节点必须是JSON对象，请检查是否漏了花括号");
+
+                // id 引用：支持数字或数字字符串
+                bool hasId = node.TryGetProperty("id", out var idElem) &&
+                             (idElem.ValueKind == JsonValueKind.Number ||
+                              (idElem.ValueKind == JsonValueKind.String && long.TryParse(idElem.GetString(), out _)));
+                if (hasId)
                 {
-                    nodes.Add(new { type = "node", data = new { id = idElem.GetInt64() } });
+                    long id = idElem.ValueKind == JsonValueKind.Number ? idElem.GetInt64()
+                        : long.Parse(idElem.GetString()!);
+                    nodes.Add(new { type = "node", data = new { id } });
                 }
                 else
                 {
                     string name = node.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-                    long uin = node.TryGetProperty("uin", out var u) && u.ValueKind == JsonValueKind.Number ? u.GetInt64() : 0;
+                    long uin = node.TryGetProperty("uin", out var u) && u.ValueKind == JsonValueKind.Number ? u.GetInt64()
+                        : (node.TryGetProperty("uin", out var u2) && u2.ValueKind == JsonValueKind.String && long.TryParse(u2.GetString(), out var u3) ? u3 : 0);
                     string content = node.TryGetProperty("content", out var c) ? c.GetString() ?? "" : "";
                     nodes.Add(new { type = "node", data = new { name, uin, content } });
                 }
@@ -620,7 +646,7 @@ public class QQEnhanceModule(
                 throw new Exception("节点列表为空");
 
             await client.CallActionAsync<object>("send_group_forward_msg", new { group_id = groupId, messages = nodes });
-            interactor.Poke("合并转发发送成功");
+            interactor.Poke($"合并转发发送成功（{nodes.Count} 个节点）");
         }
         catch (TaskCanceledException)
         {
@@ -629,6 +655,50 @@ public class QQEnhanceModule(
         catch (Exception e)
         {
             interactor.Poke($"合并转发失败：{e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 尝试修复 AI 生成的残缺 JSON 数组：只允许补全缺失的收尾括号，不允许修改内容。
+    /// 返回修复后的 JSON；无法修复时返回 null。
+    /// </summary>
+    private static string? RepairJsonArray(string json)
+    {
+        string s = json.Trim();
+        if (string.IsNullOrEmpty(s) || s[0] != '[') return null;
+
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (inString)
+            {
+                if (escaped) { escaped = false; continue; }
+                if (c == '\\') { escaped = true; continue; }
+                if (c == '"') inString = false;
+                continue;
+            }
+            switch (c)
+            {
+                case '"': inString = true; break;
+                case '[': case '{': depth++; break;
+                case ']': case '}': depth--; break;
+            }
+        }
+        if (inString || depth != 1) return null; // 引号未闭合或深度不对，无法安全修复
+
+        // 只差一个收尾括号：补 ]
+        string candidate = s + "]";
+        try
+        {
+            using var doc = JsonDocument.Parse(candidate);
+            return doc.RootElement.ValueKind == JsonValueKind.Array ? candidate : null;
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 
