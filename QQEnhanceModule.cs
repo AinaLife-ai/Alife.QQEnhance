@@ -357,7 +357,7 @@ public class QQEnhanceModule(
             : $$"""
                 使用规则：
                 - QQ平台消息ID是负数（如 -1976879391），编造或猜ID必然失败（RetCode 100/1400）。
-                - 要撤回(DeleteMsg)/贴表情(SetEmoji)/引用回复(SendReplyMessage)/转发已有合并转发(SendForwardById)某条消息，必须先调用 QGetMessages 获取准确ID列表，从中选取。
+                - 要撤回(DeleteMsg)/贴表情(SetEmoji)/引用回复(ReplyMsg)/转发已有合并转发(SendForwardById)某条消息，必须先调用 QGetMessages 获取准确ID列表，从中选取。
                 - QGetMessages 仅返回实时捕获的真实消息ID（含自己刚发的消息），不使用历史接口（历史接口ID语义不可靠，会误导操作）。
                 - QGetMessages 返回格式：[消息ID:xxx] 即该消息的真实ID，直接原样使用。
                 - 引用回复消息格式：SendReplyMessage message="内容" replyToId="真实ID" messageType="group" targetId="群号或QQ号"。
@@ -392,7 +392,7 @@ public class QQEnhanceModule(
         }
 
         if (Configuration.LiveCaptureEnabled)
-            _ = StartLiveReceiveAsync(client);
+            _ = StartLiveCaptureAsync(client);
 
         return Task.CompletedTask;
     }
@@ -435,7 +435,7 @@ public class QQEnhanceModule(
 
     [XmlFunction(FunctionMode.OneShot)]
     [Description("给QQ用户资料卡点赞")]
-    public async Task SendLikes(
+    public async Task SendQQLikes(
         [Description("QQ号")] long qq,
         [Description("点赞次数，默认50次")] int times = 50)
     {
@@ -519,7 +519,7 @@ public class QQEnhanceModule(
 
     [XmlFunction(FunctionMode.OneShot)]
     [Description("回应最近一次戳你的人：回戳或忽略。当系统提示你被戳了时调用。decide=\"yes\"回戳；decide=\"no\"忽略。只用于回应戳一戳，不用于主动戳人")]
-    public async Task PokeReply(
+    public async Task PokeBack(
         [Description("yes=回戳，no=忽略")] string decide = "yes")
     {
         if (!Configuration.PokeDecideEnabled || !Configuration.PokeEnabled) { interactor.Poke("戳回功能已禁用"); return; }
@@ -558,7 +558,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("转发指定群聊最近N条消息为合并转发消息。无需传消息ID，插件自动从实时消息缓存取真实消息（纯图片/语音段自动跳过）。count超过缓存可用数时按可用数转")]
+    [Description("转发指定群聊最近N条消息为合并转发消息。无需传消息ID，插件自动从实时缓存取真实消息（纯图片/语音段自动跳过）。count超过缓存可用数时按可用数转")]
     public async Task ForwardRecent(
         [Description("群号")] long groupId,
         [Description("转发条数，1-50，默认5")] int count = 5)
@@ -718,6 +718,7 @@ public class QQEnhanceModule(
         if (client == null) { interactor.Poke("合并转发失败：QQ客户端不可用"); return; }
         try
         {
+            // 容错：去掉首尾多余空白；若AI漏了收尾括号，尝试补全（最多补一层 ]）
             string json = nodesJson.Trim();
             try
             {
@@ -729,7 +730,7 @@ public class QQEnhanceModule(
             {
                 string? repaired = RepairJsonArray(json);
                 if (repaired == null)
-                    throw new JsonException("nodesJson不是合法JSON数组（检查是否漏了收尾括号或引号未闭合）。正确示例：[{\"name\":\"昵称\",\"uin\":123456,\"content\":\"内容\"},{\"id\":-1000000}]");
+                    throw new JsonException("nodesJson不是合法JSON数组（检查是否漏了收尾括号或引号未闭合）。正确示例：[{\"name\":\"昵称\",\"uin\":123456,\"content\":\"内容\"},{\"id\":-1234567890}]");
                 json = repaired;
             }
 
@@ -777,6 +778,7 @@ public class QQEnhanceModule(
         }
     }
 
+    /// <summary>修复AI生成的残缺JSON数组：只允许补全缺失的收尾括号，不允许修改内容。返回修复后的JSON，无法修复时返回null</summary>
     private static string? RepairJsonArray(string json)
     {
         string s = json.Trim();
@@ -838,7 +840,7 @@ public class QQEnhanceModule(
         }
         catch (TaskCanceledException)
         {
-            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。QQ服务器可能仍在后台处理，卡片可能稍后出现；请用get_messages确认，不要重复发送。若持续超时请检查musicId是否有效");
+            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。QQ服务器可能仍在后台处理，卡片可能稍后出现；请用GetMessages确认，不要重复发送。若持续超时请检查musicId是否有效");
         }
         catch (Exception e)
         {
@@ -847,7 +849,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("获取群聊/私聊最近消息及每条消息的消息ID，用于定位要撤回/贴表情/引用回复/转发的消息。群聊传groupId；私聊传groupId=0并传userId。仅返回实时捕获的真实ID（含自己刚发的消息），返回格式：[消息ID:xxx]")]
+    [Description("获取群聊/私聊最近消息及每条消息的消息ID，用于定位要撤回(DeleteMsg)/贴表情(SetEmoji)/引用回复(SendReplyMessage)或转发(SendForwardById)的消息。群聊传groupId；私聊传groupId=0并传userId。仅返回实时捕获的真实ID（含自己刚发的消息），返回格式：[消息ID:xxx]")]
     public async Task QGetMessages(
         [Description("群号（私聊时传0）")] long groupId,
         [Description("QQ号（仅私聊时需要）")] long userId = 0,
@@ -957,7 +959,7 @@ public class QQEnhanceModule(
                     ? $"用户{noticeEvent.UserId}"
                     : $"用户{noticeEvent.UserId}({userName})";
                 string where = isGroup ? $"在群 {noticeEvent.GroupId} 戳了戳你" : "私聊戳了戳你";
-                interactor.Poke($"[System {userText} {where}。你可以输出 <PokeReply decide=\"yes\"/> 回戳，或 <PokeReply decide=\"no\"/> 忽略]");
+                interactor.Poke($"[System {userText} {where}。你可以输出 <PokeBack decide=\"yes\"/> 回戳，或 <PokeBack decide=\"no\"/> 忽略]");
             }
         }
         catch (Exception e)
