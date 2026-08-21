@@ -71,5 +71,5 @@ QQ增强插件：贴表情、点赞、撤回、禁言、戳一戳、引用回复
 - **QQ平台消息ID为负数**。撤回/贴表情/引用回复/转发必须使用 `QGetMessages` 返回的真实消息ID，严禁编造或猜测（否则 RetCode 100/1400 失败）
 - 引用回复使用 OneBot 结构化 `reply` 参数（`send_msg` 的 `reply` 字段），失败时自动回退 `[CQ:reply]` CQ 码方式
 - 私聊戳一戳使用 `friend_poke`（NapCat/LLOneBot 支持），群聊戳一戳使用 `group_poke`
-- 合并转发构造节点：`{"name":"昵称","uin":QQ号,"content":"内容"}` 自定义内容，或 `{"id":真实消息ID}` 引用真实消息
+- 合并转发构造节点：`{"name":"昵称","uin":QQ号,"content":"内容"}` 自定义内容，或 `{"id":真实消息ID}` 引用真实消息；`id` 支持数字与数字字符串；JSON 缺收尾括号时自动补全；解析失败给出含正确示例的提示
 - 实时消息捕获参考了 [YuYang.QQTools](https://github.com/3026838203/YuYang.QQTools) 的 WebSocket 监听思路，特此致谢
