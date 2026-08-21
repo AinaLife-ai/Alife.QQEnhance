@@ -357,7 +357,7 @@ public class QQEnhanceModule(
             : $$"""
                 使用规则：
                 - QQ平台消息ID是负数（如 -1976879391），编造或猜ID必然失败（RetCode 100/1400）。
-                - 要撤回(DeleteMsg)/贴表情(SetEmoji)/引用回复(SendReplyMessage)/转发已有合并转发(SendForwardById)某条消息，必须先调用 QGetMessages 获取真实ID列表，从中选取。
+                - 要撤回(DeleteMsg)/贴表情(SetEmoji)/引用回复(ReplyMsg)/转发已有合并转发(SendForwardById)某条消息，必须先调用 QGetMessages 获取准确ID列表，从中选取。
                 - QGetMessages 仅返回实时捕获的真实消息ID（含自己刚发的消息），不使用历史接口（历史接口ID语义不可靠，会误导操作）。
                 - QGetMessages 返回格式：[消息ID:xxx] 即该消息的真实ID，直接原样使用。
                 - 引用回复消息格式：SendReplyMessage message="内容" replyToId="真实ID" messageType="group" targetId="群号或QQ号"。
@@ -366,7 +366,7 @@ public class QQEnhanceModule(
                 - 合并转发：SendForwardById id=已有合并转发ID；SendForwardNew 构造新转发（传JSON数组 [{"name":"昵称","uin":QQ号,"content":"内容"},{"id":真实消息ID}]，必须完整闭合）。
                 - 戳一戳：PokeGroupMember 群聊戳成员；PokePrivateMember 私聊戳用户（QQ号）；PokeBack 回应最近戳你的人（收到戳一戳提示后可用）。
                 - 音乐卡片：SendMusicCard（可能较慢，若超时请稍用QGetMessages确认是否已发出，不要重复发送）。
-                """);
+                """;
 
         XmlHandler xmlHandler = new(this) {
             Description = "提供QQ贴表情、点赞、撤回、禁言、戳一戳、引用回复、合并转发、音乐卡片、消息ID查询等增强功能。⚠重要：QQ消息ID为负数，撤回/贴表情/引用回复/转发必须先用getmessages获取真实ID，严禁编造。另有ForwardRecent/ReplyRecent可免ID转发/回复，PokeBack可回戳",
@@ -496,7 +496,7 @@ public class QQEnhanceModule(
     [XmlFunction(FunctionMode.OneShot)]
     [Description("在群聊中戳一戳指定成员")]
     public async Task PokeGroupMember(
-        [FromGroup] long groupId,
+        [Description("群号")] long groupId,
         [Description("QQ号")] long userId)
     {
         if (!Configuration.PokeEnabled) { interactor.Poke("戳一戳功能已禁用"); return; }
@@ -558,9 +558,9 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("转发指定群聊最近N条消息为合并转发消息。无需传消息ID，插件自动从实时消息缓存取真实消息（纯图片/语音段自动跳过）。count超过缓存可用数时按可用数转")]
+    [Description("转发指定群聊最近N条消息为合并转发消息。无需传消息ID，插件自动从实时缓存取真实消息（纯图片/语音段自动跳过）。count超过缓存可用数时按可用数转")]
     public async Task ForwardRecent(
-        [FromGroup] long groupId,
+        [Description("群号")] long groupId,
         [Description("转发条数，1-50，默认5")] int count = 5)
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
@@ -670,7 +670,7 @@ public class QQEnhanceModule(
     }
 
     /// <summary>从实时缓存中定位目标用户最近一条消息。target为纯数字按QQ号精确匹配，否则按昵称包含匹配</summary>
-    private LiveMessage? FindLatestFromUser(long targetScope, string target, bool isGroup)
+    private LiveMessage? FindLatestFromCache(long targetScope, string target, bool isGroup)
     {
         bool byId = long.TryParse(target.Trim(), out long targetUin);
         var candidates = _liveMessages
@@ -685,7 +685,7 @@ public class QQEnhanceModule(
     [XmlFunction(FunctionMode.OneShot)]
     [Description("转发一条已有的合并转发消息到群聊。forwardId为合并转发消息ID（必须来自getmessages，可为负数）")]
     public async Task SendForwardById(
-        [FromGroup] long groupId,
+        [Description("群号")] long groupId,
         [Description("合并转发消息ID（必须来自getmessages）")] long forwardId)
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
@@ -710,7 +710,7 @@ public class QQEnhanceModule(
     [XmlFunction(FunctionMode.OneShot)]
     [Description("构造并发送新的合并转发消息到群聊。nodesJson为JSON数组，每个节点两种格式：{\"name\":\"昵称\",\"uin\":QQ号,\"content\":\"内容\"}（自定义内容）或 {\"id\":真实消息ID}（引用真实消息，id必须来自getmessages，数字或数字字符串均可）。⚠必须传完整合法的JSON数组，最外层用[]包裹，不要漏收尾括号")]
     public async Task SendForwardNew(
-        [FromGroup] long groupId,
+        [Description("群号")] long groupId,
         [Description("节点JSON数组（必须是完整合法的JSON，[]闭合）")] string nodesJson)
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
@@ -840,7 +840,7 @@ public class QQEnhanceModule(
         }
         catch (TaskCanceledException)
         {
-            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。QQ服务器可能仍在后台处理，卡片可能稍后出现；请用getmessages确认，不要重复发送。若持续超时请检查musicId是否有效");
+            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。QQ服务器可能仍在后台处理，卡片可能稍后出现；请用GetMessages确认，不要重复发送。若持续超时请检查musicId是否有效");
         }
         catch (Exception e)
         {
