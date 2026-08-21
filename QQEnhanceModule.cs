@@ -21,82 +21,82 @@ namespace AinaLife.QQEnhance;
 
 public class QQEnhanceConfig
 {
-    [DisplayName("贴表情")]
-    [Description("启用给QQ消息贴表情功能")]
+    [DisplayName("璐磋〃鎯?)]
+    [Description("鍚敤缁橯Q娑堟伅璐磋〃鎯呭姛鑳?)]
     public bool EmojiReactEnabled { get; set; } = true;
 
-    [DisplayName("点赞")]
-    [Description("启用给QQ用户资料卡点赞功能")]
+    [DisplayName("鐐硅禐")]
+    [Description("鍚敤缁橯Q鐢ㄦ埛璧勬枡鍗＄偣璧炲姛鑳?)]
     public bool SendLikesEnabled { get; set; } = false;
 
-    [DisplayName("撤回")]
-    [Description("启用撤回QQ消息功能")]
+    [DisplayName("鎾ゅ洖")]
+    [Description("鍚敤鎾ゅ洖QQ娑堟伅鍔熻兘")]
     public bool DeleteMsgEnabled { get; set; } = true;
 
-    [DisplayName("禁言")]
-    [Description("启用禁言QQ群成员功能")]
+    [DisplayName("绂佽█")]
+    [Description("鍚敤绂佽█QQ缇ゆ垚鍛樺姛鑳?)]
     public bool GroupBanEnabled { get; set; } = true;
 
-    [DisplayName("音乐卡片")]
-    [Description("启用发送音乐卡片功能")]
+    [DisplayName("闊充箰鍗＄墖")]
+    [Description("鍚敤鍙戦€侀煶涔愬崱鐗囧姛鑳?)]
     public bool MusicCardEnabled { get; set; } = false;
 
-    [DisplayName("戳一戳")]
-    [Description("启用群聊戳一戳成员功能")]
+    [DisplayName("鎴充竴鎴?)]
+    [Description("鍚敤缇よ亰鎴充竴鎴虫垚鍛樺姛鑳?)]
     public bool PokeEnabled { get; set; } = true;
 
-    [DisplayName("戳回决策")]
-    [Description("收到别人的戳一戳后注入决策提示，让模型顺带决定是否回戳（PokeBack），不影响正常回复构建")]
+    [DisplayName("鎴冲洖鍐崇瓥")]
+    [Description("鏀跺埌鍒汉鐨勬埑涓€鎴冲悗娉ㄥ叆鍐崇瓥鎻愮ず锛岃妯″瀷椤哄甫鍐冲畾鏄惁鍥炴埑锛圥okeBack锛夛紝涓嶅奖鍝嶆甯稿洖澶嶆瀯寤?)]
     public bool PokeDecideEnabled { get; set; } = true;
 
-    [DisplayName("引用回复")]
-    [Description("启用引用回复消息功能")]
+    [DisplayName("寮曠敤鍥炲")]
+    [Description("鍚敤寮曠敤鍥炲娑堟伅鍔熻兘")]
     public bool ReplyEnabled { get; set; } = true;
 
-    [DisplayName("合并转发")]
-    [Description("启用合并转发消息功能（转发已有/构造新转发/转发最近消息）")]
+    [DisplayName("鍚堝苟杞彂")]
+    [Description("鍚敤鍚堝苟杞彂娑堟伅鍔熻兘锛堣浆鍙戝凡鏈?鏋勯€犳柊杞彂/杞彂鏈€杩戞秷鎭級")]
     public bool ForwardEnabled { get; set; } = true;
 
-    [DisplayName("兼容模式")]
-    [Description("与YuYang.QQTools（幼央工具箱）的协作模式：Auto=检测到幼央自动让位重叠功能；PreferQQEnhance=优先本插件；PreferYuYang=重叠功能一律让位（幼央未装时自动回退自持）；Off=不检测全功能注册")]
+    [DisplayName("鍏煎妯″紡")]
+    [Description("涓嶻uYang.QQTools锛堝辜澶伐鍏风锛夌殑鍗忎綔妯″紡锛欰uto=妫€娴嬪埌骞煎ぎ鑷姩璁╀綅閲嶅彔鍔熻兘锛汸referQQEnhance=浼樺厛鏈彃浠讹紱PreferYuYang=閲嶅彔鍔熻兘涓€寰嬭浣嶏紙骞煎ぎ鏈鏃惰嚜鍔ㄥ洖閫€鑷寔锛夛紱Off=涓嶆娴嬪叏鍔熻兘娉ㄥ唽")]
     public string CompatibilityMode { get; set; } = "Auto";
 
-    [DisplayName("感知群禁言")]
-    [Description("感知自己被禁言/解除禁言并通知AI")]
+    [DisplayName("鎰熺煡缇ょ瑷€")]
+    [Description("鎰熺煡鑷繁琚瑷€/瑙ｉ櫎绂佽█骞堕€氱煡AI")]
     public bool PerceiveGroupBan { get; set; } = true;
 
-    [DisplayName("感知成员进群")]
-    [Description("感知新成员进群并通知AI")]
+    [DisplayName("鎰熺煡鎴愬憳杩涚兢")]
+    [Description("鎰熺煡鏂版垚鍛樿繘缇ゅ苟閫氱煡AI")]
     public bool PerceiveGroupIncrease { get; set; } = true;
 
-    [DisplayName("输入中状态")]
-    [Description("私聊时发送输入中状态")]
+    [DisplayName("杈撳叆涓姸鎬?)]
+    [Description("绉佽亰鏃跺彂閫佽緭鍏ヤ腑鐘舵€?)]
     public bool TypingIndicatorEnabled { get; set; } = true;
 
-    [DisplayName("输入中延迟(秒)")]
-    [Description("收到消息后延迟多久开始发送输入中状态")]
+    [DisplayName("杈撳叆涓欢杩?绉?")]
+    [Description("鏀跺埌娑堟伅鍚庡欢杩熷涔呭紑濮嬪彂閫佽緭鍏ヤ腑鐘舵€?)]
     public double TypingDelaySeconds { get; set; } = 2.0;
 
-    [DisplayName("输入中间隔(秒)")]
-    [Description("输入中状态刷新间隔")]
+    [DisplayName("杈撳叆涓棿闅?绉?")]
+    [Description("杈撳叆涓姸鎬佸埛鏂伴棿闅?)]
     public double TypingIntervalSeconds { get; set; } = 2.0;
 
-    [DisplayName("输入中最大时长(秒)")]
-    [Description("输入中状态最大持续时长")]
+    [DisplayName("杈撳叆涓渶澶ф椂闀?绉?")]
+    [Description("杈撳叆涓姸鎬佹渶澶ф寔缁椂闀?)]
     public double TypingMaxSeconds { get; set; } = 60.0;
 
-    [DisplayName("实时消息捕获")]
-    [Description("独立WS监听实时事件捕获真实消息ID（撤回/贴表情可靠性核心）")]
+    [DisplayName("瀹炴椂娑堟伅鎹曡幏")]
+    [Description("鐙珛WS鐩戝惉瀹炴椂浜嬩欢鎹曡幏鐪熷疄娑堟伅ID锛堟挙鍥?璐磋〃鎯呭彲闈犳€ф牳蹇冿級")]
     public bool LiveCaptureEnabled { get; set; } = true;
 
-    [DisplayName("实时消息缓存大小")]
-    [Description("缓存最近N条实时消息的消息ID/内容，用于qgetmessages查询")]
+    [DisplayName("瀹炴椂娑堟伅缂撳瓨澶у皬")]
+    [Description("缂撳瓨鏈€杩慛鏉″疄鏃舵秷鎭殑娑堟伅ID/鍐呭锛岀敤浜巕getmessages鏌ヨ")]
     public int LiveCacheSize { get; set; } = 200;
 }
 
-[Module("QQ增强",
-    "提供QQ贴表情、点赞、撤回、禁言、戳一戳、引用回复、合并转发、音乐卡片、感知通知、输入中状态等增强功能，支持与YuYang.QQTools自动分工",
-    defaultCategory: "AinaLife/社交平台")]
+[Module("QQ澧炲己",
+    "鎻愪緵QQ璐磋〃鎯呫€佺偣璧炪€佹挙鍥炪€佺瑷€銆佹埑涓€鎴炽€佸紩鐢ㄥ洖澶嶃€佸悎骞惰浆鍙戙€侀煶涔愬崱鐗囥€佹劅鐭ラ€氱煡銆佽緭鍏ヤ腑鐘舵€佺瓑澧炲己鍔熻兘锛屾敮鎸佷笌YuYang.QQTools鑷姩鍒嗗伐",
+    defaultCategory: "AinaLife/绀句氦骞冲彴")]
 public class QQEnhanceModule(
     XmlFunctionCaller functionCaller,
     ILogger<QQEnhanceModule> logger,
@@ -108,10 +108,10 @@ public class QQEnhanceModule(
 {
     public QQEnhanceConfig Configuration { get; set; } = null!;
 
-    /// <summary>幼央工具箱模块的完整类型名</summary>
+    /// <summary>骞煎ぎ宸ュ叿绠辨ā鍧楃殑瀹屾暣绫诲瀷鍚?/summary>
     private const string YuYangModuleId = "YuYang.QQTools.QQToolsModule";
 
-    // QChatService 未公开 OneBotClient，通过反射获取（不修改官方代码）
+    // QChatService 鏈叕寮€ OneBotClient锛岄€氳繃鍙嶅皠鑾峰彇锛堜笉淇敼瀹樻柟浠ｇ爜锛?
     private OneBotClient? GetClient()
     {
         FieldInfo? field = typeof(QChatService).GetField("oneBotClient",
@@ -119,7 +119,7 @@ public class QQEnhanceModule(
         return field?.GetValue(qChatService) as OneBotClient;
     }
 
-    // ==================== 幼央兼容检测 ====================
+    // ==================== 骞煎ぎ鍏煎妫€娴?====================
 
     private bool IsYuYangActive()
     {
@@ -149,10 +149,10 @@ public class QQEnhanceModule(
 
     private string DelegateHint(string feature, string yuYangFunction)
     {
-        return $"{feature}功能由 YuYang.QQTools（幼央工具箱）接管，请调用幼央的 {yuYangFunction} 函数";
+        return $"{feature}鍔熻兘鐢?YuYang.QQTools锛堝辜澶伐鍏风锛夋帴绠★紝璇疯皟鐢ㄥ辜澶殑 {yuYangFunction} 鍑芥暟";
     }
 
-    // ==================== 统一 OneBot 调用（超时/失败友好提示） ====================
+    // ==================== 缁熶竴 OneBot 璋冪敤锛堣秴鏃?澶辫触鍙嬪ソ鎻愮ず锛?====================
 
     private async Task<string?> CallActionSafeAsync(
         string action,
@@ -161,27 +161,27 @@ public class QQEnhanceModule(
         OneBotClient? client)
     {
         if (client == null)
-            return $"{feature}失败：QQ客户端不可用";
+            return $"{feature}澶辫触锛歈Q瀹㈡埛绔笉鍙敤";
         try
         {
             await client.CallActionAsync<object>(action, @params);
-            return null; // 成功
+            return null; // 鎴愬姛
         }
         catch (TaskCanceledException)
         {
-            return $"{feature}请求超时（10秒未收到响应）。操作可能已生效，请稍后用 qgetmessages 检查确认，不要重复操作";
+            return $"{feature}璇锋眰瓒呮椂锛?0绉掓湭鏀跺埌鍝嶅簲锛夈€傛搷浣滃彲鑳藉凡鐢熸晥锛岃绋嶅悗鐢?qgetmessages 妫€鏌ョ‘璁わ紝涓嶈閲嶅鎿嶄綔";
         }
         catch (Exception e)
         {
-            return $"{feature}失败：{e.Message}";
+            return $"{feature}澶辫触锛歿e.Message}";
         }
     }
 
-    // Typing indicator 状态管理
+    // Typing indicator 鐘舵€佺鐞?
     private readonly Dictionary<long, CancellationTokenSource> _typingCts = new();
     private readonly object _typingLock = new();
 
-    // ==================== 实时消息捕获（真实消息ID来源） ====================
+    // ==================== 瀹炴椂娑堟伅鎹曡幏锛堢湡瀹炴秷鎭疘D鏉ユ簮锛?====================
     private sealed class LiveMessage
     {
         public long MessageId { get; init; }
@@ -217,11 +217,11 @@ public class QQEnhanceModule(
             _liveWs = ws;
             _liveCts = cts;
             _ = LiveReceiveLoopAsync(ws, cts.Token);
-            logger.LogInformation("QQ增强：实时消息捕获已连接 {Url}", url);
+            logger.LogInformation("QQ澧炲己锛氬疄鏃舵秷鎭崟鑾峰凡杩炴帴 {Url}", url);
         }
         catch (Exception e)
         {
-            logger.LogWarning(e, "QQ增强：实时消息捕获连接失败（qgetmessages将不可用，其他功能不受影响）");
+            logger.LogWarning(e, "QQ澧炲己锛氬疄鏃舵秷鎭崟鑾疯繛鎺ュけ璐ワ紙qgetmessages灏嗕笉鍙敤锛屽叾浠栧姛鑳戒笉鍙楀奖鍝嶏級");
         }
     }
 
@@ -244,7 +244,7 @@ public class QQEnhanceModule(
                 using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(ms.ToArray()));
                 JsonElement root = doc.RootElement;
 
-                // 握手：第一个报文是 lifecycle connect
+                // 鎻℃墜锛氱涓€涓姤鏂囨槸 lifecycle connect
                 if (root.TryGetProperty("post_type", out var pt))
                 {
                     string postType = pt.GetString() ?? "";
@@ -314,7 +314,7 @@ public class QQEnhanceModule(
         }
         catch (Exception e)
         {
-            logger.LogDebug(e, "QQ增强：实时消息捕获循环结束");
+            logger.LogDebug(e, "QQ澧炲己锛氬疄鏃舵秷鎭崟鑾峰惊鐜粨鏉?);
         }
         finally
         {
@@ -331,7 +331,40 @@ public class QQEnhanceModule(
         _liveWs = null;
     }
 
-    // ==================== 戳回决策状态 ====================
+    // ==================== 鍙戦€佽嚜瀛橈紙bot 鑷繁鍙戠殑娑堟伅涔熻繘缂撳瓨锛?====================
+
+    /// <summary>鍙戦€佺被 API 鐨勮繑鍥烇紙鍙?message_id 鑷瓨锛?/summary>
+    private sealed class SendResult
+    {
+        [JsonPropertyName("message_id")]
+        public JsonElement MessageId { get; init; }
+    }
+
+    /// <summary>鎶婃湰鎻掍欢/鏈?bot 鍙戦€佺殑娑堟伅瀛樺叆瀹炴椂缂撳瓨锛堝惈娑堟伅ID锛夛紝渚?ForwardRecent/ReplyRecent/QGetMessages 浣跨敤</summary>
+    private void RecordSentMessage(long messageId, long groupId, long userId, string raw, long time)
+    {
+        if (messageId == 0) return;
+        if (_liveMessages.Any(m => m.MessageId == messageId)) return;
+
+        _liveMessages.Enqueue(new LiveMessage {
+            MessageId = messageId, UserId = userId, GroupId = groupId,
+            Nickname = "鎴?, Raw = raw, Time = time, IsSelf = true,
+            Seq = Interlocked.Increment(ref _liveSeq)
+        });
+        int max = Math.Max(1, Configuration.LiveCacheSize);
+        while (_liveMessages.Count > max)
+            _liveMessages.TryDequeue(out _);
+    }
+
+    /// <summary>浠庡彂閫佺粨鏋滀腑鎻愬彇 message_id锛堝吋瀹规暟瀛?鏁板瓧瀛楃涓诧級锛屽彇涓嶅埌杩斿洖0</summary>
+    private static long ExtractSentId(SendResult? result)
+    {
+        if (result == null) return 0;
+        return result.MessageId.ValueKind == JsonValueKind.Number ? result.MessageId.GetInt64()
+            : (result.MessageId.ValueKind == JsonValueKind.String && long.TryParse(result.MessageId.GetString(), out var p) ? p : 0);
+    }
+
+    // ==================== 鎴冲洖鍐崇瓥鐘舵€?====================
     private sealed record PokeRequest(long UserId, long GroupId, bool IsGroup, DateTime Time);
     private PokeRequest? _lastPokeRequest;
     private DateTime _lastPokePromptTime = DateTime.MinValue;
@@ -341,35 +374,35 @@ public class QQEnhanceModule(
     {
         bool yuYangActive = IsYuYangActive();
         if (yuYangActive)
-            logger.LogInformation("QQ增强：检测到 YuYang.QQTools 已启用，重叠功能将让位（兼容模式 {Mode}）", Configuration.CompatibilityMode);
+            logger.LogInformation("QQ澧炲己锛氭娴嬪埌 YuYang.QQTools 宸插惎鐢紝閲嶅彔鍔熻兘灏嗚浣嶏紙鍏煎妯″紡 {Mode}锛?, Configuration.CompatibilityMode);
 
         string explanation = yuYangActive
             ? $$"""
-                使用规则：
-                - 已检测到 YuYang.QQTools（幼央工具箱）接管：戳一戳、引用回复、点赞、贴表情、撤回、输入中 请调用幼央的函数（PokeGroupMember/SendReplyMessage/SendLike/SendEmojiLike/DeleteMessage）。
-                - 本插件负责：禁言(GroupBan)、音乐卡片(SendMusicCard)、合并转发(SendForwardById/SendForwardNew/ForwardRecent)、消息ID查询(QGetMessages)、戳回决策(PokeBack)、感知通知。
-                - QQ平台消息ID通常是负数（如 -1976879391），编造或猜ID必然失败（RetCode 100/1400）。
-                - 要撤回/贴表情/引用回复某条消息，必须先调用 QGetMessages 获取真实ID列表，从中选取。
-                - QGetMessages 仅返回实时捕获的真实消息ID（含自己刚发的消息），不使用历史接口。
-                - QGetMessages 返回格式：[消息ID:xxx] 即该消息的真实ID，直接原样使用。
-                - 若只想回复某人最近一条消息或转发最近几条消息，可直接用 ReplyRecent/ForwardRecent，无需自己处理消息ID。
+                浣跨敤瑙勫垯锛?
+                - 宸叉娴嬪埌 YuYang.QQTools锛堝辜澶伐鍏风锛夋帴绠★細鎴充竴鎴炽€佸紩鐢ㄥ洖澶嶃€佺偣璧炪€佽创琛ㄦ儏銆佹挙鍥炪€佽緭鍏ヤ腑 璇疯皟鐢ㄥ辜澶殑鍑芥暟锛圥okeGroupMember/SendReplyMessage/SendLike/SendEmojiLike/DeleteMessage锛夈€?
+                - 鏈彃浠惰礋璐ｏ細绂佽█(GroupBan)銆侀煶涔愬崱鐗?SendMusicCard)銆佸悎骞惰浆鍙?SendForwardById/SendForwardNew/ForwardRecent)銆佹秷鎭疘D鏌ヨ(QGetMessages)銆佹埑鍥炲喅绛?PokeBack)銆佹劅鐭ラ€氱煡銆?
+                - QQ骞冲彴娑堟伅ID閫氬父鏄礋鏁帮紙濡?-1976879391锛夛紝缂栭€犳垨鐚淚D蹇呯劧澶辫触锛圧etCode 100/1400锛夈€?
+                - 瑕佹挙鍥?璐磋〃鎯?寮曠敤鍥炲鏌愭潯娑堟伅锛屽繀椤诲厛璋冪敤 QGetMessages 鑾峰彇鐪熷疄ID鍒楄〃锛屼粠涓€夊彇銆?
+                - QGetMessages 杩斿洖瀹炴椂鎹曡幏鐨勭湡瀹炴秷鎭疘D锛堝惈鑷繁鍒氬彂鐨勬秷鎭紝鍙戦€佹椂鑷姩璁板綍锛夈€?
+                - QGetMessages 杩斿洖鏍煎紡锛歔娑堟伅ID:xxx] 鍗宠娑堟伅鐨勭湡瀹濱D锛岀洿鎺ュ師鏍蜂娇鐢ㄣ€?
+                - 鑻ュ彧鎯冲洖澶嶆煇浜烘渶杩戜竴鏉℃秷鎭垨杞彂鏈€杩戝嚑鏉℃秷鎭紝鍙洿鎺ョ敤 ReplyRecent/ForwardRecent锛屾棤闇€鑷繁澶勭悊娑堟伅ID銆?
                 """
             : $$"""
-                使用规则：
-                - QQ平台消息ID是负数（如 -1976879391），编造或猜ID必然失败（RetCode 100/1400）。
-                - 要撤回(DeleteMsg)/贴表情(SetEmoji)/引用回复(ReplyMsg)/转发已有合并转发(SendForwardById)某条消息，必须先调用 QGetMessages 获取准确ID列表，从中选取。
-                - QGetMessages 仅返回实时捕获的真实消息ID（含自己刚发的消息），不使用历史接口（历史接口ID语义不可靠，会误导操作）。
-                - QGetMessages 返回格式：[消息ID:xxx] 即该消息的真实ID，直接原样使用。
-                - 引用回复消息格式：SendReplyMessage message="内容" replyToId="真实ID" messageType="group" targetId="群号或QQ号"。
-                - 省事方式：只想回复某人的最近一条消息 → 用 ReplyRecent message="内容" target="QQ号或昵称" targetId="群号/QQ号"，不用查ID。
-                - 省事方式：想转发某群最近N条消息为合并转发 → 用 ForwardRecent groupId="群号" count="N"，不用构造JSON。
-                - 合并转发：SendForwardById id=已有合并转发ID；SendForwardNew 构造新转发（传JSON数组 [{"name":"昵称","uin":QQ号,"content":"内容"},{"id":真实消息ID}]，必须完整闭合）。
-                - 戳一戳：PokeGroupMember 群聊戳成员；PokePrivateMember 私聊戳用户（QQ号）；PokeBack 回应最近戳你的人（收到戳一戳提示后可用）。
-                - 音乐卡片：SendMusicCard（可能较慢，若超时请稍用QGetMessages确认是否已发出，不要重复发送）。
+                浣跨敤瑙勫垯锛?
+                - QQ骞冲彴娑堟伅ID鏄礋鏁帮紙濡?-1976879391锛夛紝缂栭€犳垨鐚淚D蹇呯劧澶辫触锛圧etCode 100/1400锛夈€?
+                - 瑕佹挙鍥?DeleteMsg)/璐磋〃鎯?SetEmoji)/寮曠敤鍥炲(ReplyMsg)/杞彂宸叉湁鍚堝苟杞彂(SendForwardById)鏌愭潯娑堟伅锛屽繀椤诲厛璋冪敤 QGetMessages 鑾峰彇鍑嗙‘ID鍒楄〃锛屼粠涓€夊彇銆?
+                - QGetMessages 杩斿洖瀹炴椂鎹曡幏鐨勭湡瀹炴秷鎭疘D锛堝惈鑷繁鍒氬彂鐨勬秷鎭紝鍙戦€佹椂鑷姩璁板綍锛夈€?
+                - QGetMessages 杩斿洖鏍煎紡锛歔娑堟伅ID:xxx] 鍗宠娑堟伅鐨勭湡瀹濱D锛岀洿鎺ュ師鏍蜂娇鐢ㄣ€?
+                - 寮曠敤鍥炲娑堟伅鏍煎紡锛歋endReplyMessage message="鍐呭" replyToId="鐪熷疄ID" messageType="group" targetId="缇ゅ彿鎴朡Q鍙?銆?
+                - 鐪佷簨鏂瑰紡锛氬彧鎯冲洖澶嶆煇浜虹殑鏈€杩戜竴鏉℃秷鎭?鈫?鐢?ReplyRecent message="鍐呭" target="QQ鍙锋垨鏄电О" targetId="缇ゅ彿/QQ鍙?锛屼笉鐢ㄦ煡ID銆?
+                - 鐪佷簨鏂瑰紡锛氭兂杞彂鏌愮兢鏈€杩慛鏉℃秷鎭负鍚堝苟杞彂 鈫?鐢?ForwardRecent groupId="缇ゅ彿" count="N"锛屼笉鐢ㄦ瀯閫燡SON銆?
+                - 鍚堝苟杞彂锛歋endForwardById id=宸叉湁鍚堝苟杞彂ID锛汼endForwardNew 鏋勯€犳柊杞彂锛堜紶JSON鏁扮粍 [{"name":"鏄电О","uin":QQ鍙?"content":"鍐呭"},{"id":鐪熷疄娑堟伅ID}]锛屽繀椤诲畬鏁撮棴鍚堬級銆?
+                - 鎴充竴鎴筹細PokeGroupMember 缇よ亰鎴虫垚鍛橈紱PokePrivateMember 绉佽亰鎴崇敤鎴凤紙QQ鍙凤級锛汸okeBack 鍥炲簲鏈€杩戞埑浣犵殑浜猴紙鏀跺埌鎴充竴鎴虫彁绀哄悗鍙敤锛夈€?
+                - 闊充箰鍗＄墖锛歋endMusicCard锛堝彲鑳借緝鎱紝鑻ヨ秴鏃惰绋嶇敤QGetMessages纭鏄惁宸插彂鍑猴紝涓嶈閲嶅鍙戦€侊級銆?
                 """;
 
         XmlHandler xmlHandler = new(this) {
-            Description = "提供QQ贴表情、点赞、撤回、禁言、戳一戳、引用回复、合并转发、音乐卡片、消息ID查询等增强功能。⚠重要：QQ消息ID为负数，撤回/贴表情/引用回复/转发必须先用getmessages获取真实ID，严禁编造。另有ForwardRecent/ReplyRecent可免ID转发/回复，PokeBack可回戳",
+            Description = "鎻愪緵QQ璐磋〃鎯呫€佺偣璧炪€佹挙鍥炪€佺瑷€銆佹埑涓€鎴炽€佸紩鐢ㄥ洖澶嶃€佸悎骞惰浆鍙戙€侀煶涔愬崱鐗囥€佹秷鎭疘D鏌ヨ绛夊寮哄姛鑳姐€傗殸閲嶈锛歈Q娑堟伅ID涓鸿礋鏁帮紝鎾ゅ洖/璐磋〃鎯?寮曠敤鍥炲/杞彂蹇呴』鍏堢敤getmessages鑾峰彇鐪熷疄ID锛屼弗绂佺紪閫犮€傚彟鏈塅orwardRecent/ReplyRecent鍙厤ID杞彂/鍥炲锛孭okeBack鍙洖鎴?,
             Explanation = explanation
         };
         functionCaller.RegisterHandler(xmlHandler, DocumentMode.Implicit, DestroyCancellationToken);
@@ -377,14 +410,14 @@ public class QQEnhanceModule(
         OneBotClient? client = GetClient();
         if (client == null)
         {
-            logger.LogWarning("无法获取 OneBotClient，QQ增强功能不可用（请确认已启用QQ聊天模块）");
+            logger.LogWarning("鏃犳硶鑾峰彇 OneBotClient锛孮Q澧炲己鍔熻兘涓嶅彲鐢紙璇风‘璁ゅ凡鍚敤QQ鑱婂ぉ妯″潡锛?);
             return Task.CompletedTask;
         }
 
         if (Configuration.PerceiveGroupBan || Configuration.PerceiveGroupIncrease || Configuration.PokeDecideEnabled)
             client.EventReceived += OnEventReceived;
 
-        // 输入中状态：幼央接管时自动让位（避免双插件同时发 set_input_status）
+        // 杈撳叆涓姸鎬侊細骞煎ぎ鎺ョ鏃惰嚜鍔ㄨ浣嶏紙閬垮厤鍙屾彃浠跺悓鏃跺彂 set_input_status锛?
         if (Configuration.TypingIndicatorEnabled && !ShouldDelegate())
         {
             ChatBot.ChatSent += OnChatSent;
@@ -418,31 +451,31 @@ public class QQEnhanceModule(
         return Task.CompletedTask;
     }
 
-    // ==================== 工具函数 ====================
+    // ==================== 宸ュ叿鍑芥暟 ====================
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("给QQ消息贴表情。emojiId为表情ID。⚠：messageId必须用getmessages取真实ID（可为负数），严禁编造或猜测")]
+    [Description("缁橯Q娑堟伅璐磋〃鎯呫€俥mojiId涓鸿〃鎯匢D銆傗殸锛歮essageId蹇呴』鐢╣etmessages鍙栫湡瀹濱D锛堝彲涓鸿礋鏁帮級锛屼弗绂佺紪閫犳垨鐚滄祴")]
     public async Task SetEmoji(
-        [Description("消息ID（必须来自getmessages）")] long messageId,
-        [Description("表情ID，201为点赞")] int emojiId)
+        [Description("娑堟伅ID锛堝繀椤绘潵鑷猤etmessages锛?)] long messageId,
+        [Description("琛ㄦ儏ID锛?01涓虹偣璧?)] int emojiId)
     {
-        if (!Configuration.EmojiReactEnabled) { interactor.Poke("贴表情功能已禁用"); return; }
-        if (ShouldDelegate()) { interactor.Poke(DelegateHint("贴表情", "SendEmojiLike")); return; }
+        if (!Configuration.EmojiReactEnabled) { interactor.Poke("璐磋〃鎯呭姛鑳藉凡绂佺敤"); return; }
+        if (ShouldDelegate()) { interactor.Poke(DelegateHint("璐磋〃鎯?, "SendEmojiLike")); return; }
         OneBotClient? client = GetClient();
-        string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = messageId, emoji_id = emojiId }, "贴表情", client);
-        interactor.Poke(err ?? "贴表情成功");
+        string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = messageId, emoji_id = emojiId }, "璐磋〃鎯?, client);
+        interactor.Poke(err ?? "璐磋〃鎯呮垚鍔?);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("给QQ用户资料卡点赞")]
+    [Description("缁橯Q鐢ㄦ埛璧勬枡鍗＄偣璧?)]
     public async Task SendQQLikes(
-        [Description("QQ号")] long qq,
-        [Description("点赞次数，默认50次")] int times = 50)
+        [Description("QQ鍙?)] long qq,
+        [Description("鐐硅禐娆℃暟锛岄粯璁?0娆?)] int times = 50)
     {
-        if (!Configuration.SendLikesEnabled) { interactor.Poke("点赞功能已禁用"); return; }
-        if (ShouldDelegate()) { interactor.Poke(DelegateHint("点赞", "SendLike")); return; }
+        if (!Configuration.SendLikesEnabled) { interactor.Poke("鐐硅禐鍔熻兘宸茬鐢?); return; }
+        if (ShouldDelegate()) { interactor.Poke(DelegateHint("鐐硅禐", "SendLike")); return; }
         OneBotClient? client = GetClient();
-        if (client == null) { interactor.Poke("点赞失败：QQ客户端不可用"); return; }
+        if (client == null) { interactor.Poke("鐐硅禐澶辫触锛歈Q瀹㈡埛绔笉鍙敤"); return; }
         try
         {
             var chunks = new List<int>();
@@ -452,89 +485,89 @@ public class QQEnhanceModule(
             int count = 0;
             foreach (int chunk in chunks)
             {
-                string? err = await CallActionSafeAsync("send_like", new { user_id = qq, times = chunk }, "点赞", client);
+                string? err = await CallActionSafeAsync("send_like", new { user_id = qq, times = chunk }, "鐐硅禐", client);
                 if (err != null)
                 {
-                    interactor.Poke($"{err}（已成功 {count} 个赞）");
+                    interactor.Poke($"{err}锛堝凡鎴愬姛 {count} 涓禐锛?);
                     return;
                 }
                 count += chunk;
             }
-            interactor.Poke($"点赞成功，点了 {count} 个赞");
+            interactor.Poke($"鐐硅禐鎴愬姛锛岀偣浜?{count} 涓禐");
         }
         catch (Exception e)
         {
-            interactor.Poke($"点赞失败：{e.Message}");
+            interactor.Poke($"鐐硅禐澶辫触锛歿e.Message}");
         }
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("撤回QQ消息。要求：messageId必须用getmessages取真实ID，严禁编造")]
+    [Description("鎾ゅ洖QQ娑堟伅銆傝姹傦細messageId蹇呴』鐢╣etmessages鍙栫湡瀹濱D锛屼弗绂佺紪閫?)]
     public async Task DeleteMsg(
-        [Description("消息ID（必须来自getmessages）")] long messageId)
+        [Description("娑堟伅ID锛堝繀椤绘潵鑷猤etmessages锛?)] long messageId)
     {
-        if (!Configuration.DeleteMsgEnabled) { interactor.Poke("撤回功能已禁用"); return; }
-        if (ShouldDelegate()) { interactor.Poke(DelegateHint("撤回", "DeleteMessage")); return; }
+        if (!Configuration.DeleteMsgEnabled) { interactor.Poke("鎾ゅ洖鍔熻兘宸茬鐢?); return; }
+        if (ShouldDelegate()) { interactor.Poke(DelegateHint("鎾ゅ洖", "DeleteMessage")); return; }
         OneBotClient? client = GetClient();
-        string? err = await CallActionSafeAsync("delete_msg", new { message_id = messageId }, "撤回", client);
-        interactor.Poke(err ?? "撤回成功");
+        string? err = await CallActionSafeAsync("delete_msg", new { message_id = messageId }, "鎾ゅ洖", client);
+        interactor.Poke(err ?? "鎾ゅ洖鎴愬姛");
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("禁言QQ群成员。群号可从群消息标签[群聊消息(群号,群名)]中获取")]
+    [Description("绂佽█QQ缇ゆ垚鍛樸€傜兢鍙峰彲浠庣兢娑堟伅鏍囩[缇よ亰娑堟伅(缇ゅ彿,缇ゅ悕)]涓幏鍙?)]
     public async Task GroupBan(
-        [Description("群号")] long groupId,
-        [Description("QQ号")] long userId,
-        [Description("禁言时长(秒)，默认600秒，0为解除禁言")] int duration = 600)
+        [Description("缇ゅ彿")] long groupId,
+        [Description("QQ鍙?)] long userId,
+        [Description("绂佽█鏃堕暱(绉?锛岄粯璁?00绉掞紝0涓鸿В闄ょ瑷€")] int duration = 600)
     {
-        if (!Configuration.GroupBanEnabled) { interactor.Poke("禁言功能已禁用"); return; }
+        if (!Configuration.GroupBanEnabled) { interactor.Poke("绂佽█鍔熻兘宸茬鐢?); return; }
         OneBotClient? client = GetClient();
-        string? err = await CallActionSafeAsync("set_group_ban", new { group_id = groupId, user_id = userId, duration }, "禁言", client);
-        interactor.Poke(err ?? "禁言成功");
+        string? err = await CallActionSafeAsync("set_group_ban", new { group_id = groupId, user_id = userId, duration }, "绂佽█", client);
+        interactor.Poke(err ?? "绂佽█鎴愬姛");
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("在群聊中戳一戳指定成员")]
+    [Description("鍦ㄧ兢鑱婁腑鎴充竴鎴虫寚瀹氭垚鍛?)]
     public async Task PokeGroupMember(
-        [Description("群号")] long groupId,
-        [Description("QQ号")] long userId)
+        [Description("缇ゅ彿")] long groupId,
+        [Description("QQ鍙?)] long userId)
     {
-        if (!Configuration.PokeEnabled) { interactor.Poke("戳一戳功能已禁用"); return; }
-        if (ShouldDelegate()) { interactor.Poke(DelegateHint("戳一戳", "PokeGroupMember")); return; }
+        if (!Configuration.PokeEnabled) { interactor.Poke("鎴充竴鎴冲姛鑳藉凡绂佺敤"); return; }
+        if (ShouldDelegate()) { interactor.Poke(DelegateHint("鎴充竴鎴?, "PokeGroupMember")); return; }
         OneBotClient? client = GetClient();
-        string? err = await CallActionSafeAsync("group_poke", new { group_id = groupId, user_id = userId }, "戳一戳", client);
-        interactor.Poke(err ?? $"成功戳了戳 {userId}");
+        string? err = await CallActionSafeAsync("group_poke", new { group_id = groupId, user_id = userId }, "鎴充竴鎴?, client);
+        interactor.Poke(err ?? $"鎴愬姛鎴充簡鎴?{userId}");
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("在私聊中戳一戳指定用户（friend_poke，NapCat/LLOneBot支持）")]
+    [Description("鍦ㄧ鑱婁腑鎴充竴鎴虫寚瀹氱敤鎴凤紙friend_poke锛孨apCat/LLOneBot鏀寔锛?)]
     public async Task PokePrivateMember(
-        [Description("QQ号")] long userId)
+        [Description("QQ鍙?)] long userId)
     {
-        if (!Configuration.PokeEnabled) { interactor.Poke("戳一戳功能已禁用"); return; }
+        if (!Configuration.PokeEnabled) { interactor.Poke("鎴充竴鎴冲姛鑳藉凡绂佺敤"); return; }
         OneBotClient? client = GetClient();
-        string? err = await CallActionSafeAsync("friend_poke", new { user_id = userId }, "私聊戳一戳", client);
-        interactor.Poke(err ?? $"成功私聊戳了戳 {userId}");
+        string? err = await CallActionSafeAsync("friend_poke", new { user_id = userId }, "绉佽亰鎴充竴鎴?, client);
+        interactor.Poke(err ?? $"鎴愬姛绉佽亰鎴充簡鎴?{userId}");
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("回应最近一次戳你的人：回戳或忽略。当系统提示你被戳了时调用。decide=\"yes\"回戳；decide=\"no\"忽略。只用于回应戳一戳，不用于主动戳人")]
+    [Description("鍥炲簲鏈€杩戜竴娆℃埑浣犵殑浜猴細鍥炴埑鎴栧拷鐣ャ€傚綋绯荤粺鎻愮ず浣犺鎴充簡鏃惰皟鐢ㄣ€俤ecide=\"yes\"鍥炴埑锛沝ecide=\"no\"蹇界暐銆傚彧鐢ㄤ簬鍥炲簲鎴充竴鎴筹紝涓嶇敤浜庝富鍔ㄦ埑浜?)]
     public async Task PokeBack(
-        [Description("yes=回戳，no=忽略")] string decide = "yes")
+        [Description("yes=鍥炴埑锛宯o=蹇界暐")] string decide = "yes")
     {
-        if (!Configuration.PokeDecideEnabled || !Configuration.PokeEnabled) { interactor.Poke("戳回功能已禁用"); return; }
-        if (ShouldDelegate()) { interactor.Poke(DelegateHint("戳一戳", "PokeGroupMember")); return; }
+        if (!Configuration.PokeDecideEnabled || !Configuration.PokeEnabled) { interactor.Poke("鎴冲洖鍔熻兘宸茬鐢?); return; }
+        if (ShouldDelegate()) { interactor.Poke(DelegateHint("鎴充竴鎴?, "PokeGroupMember")); return; }
 
         if (decide != "yes")
         {
             _lastPokeRequest = null;
-            interactor.Poke("已忽略这次戳一戳");
+            interactor.Poke("宸插拷鐣ヨ繖娆℃埑涓€鎴?);
             return;
         }
 
         if (_lastPokeRequest == null)
         {
-            interactor.Poke("没有待回应的戳一戳（可能已过期或已处理）");
+            interactor.Poke("娌℃湁寰呭洖搴旂殑鎴充竴鎴筹紙鍙兘宸茶繃鏈熸垨宸插鐞嗭級");
             return;
         }
 
@@ -542,31 +575,31 @@ public class QQEnhanceModule(
         if ((DateTime.Now - req.Time) > TimeSpan.FromMinutes(10))
         {
             _lastPokeRequest = null;
-            interactor.Poke("戳一戳请求已过期，不回戳");
+            interactor.Poke("鎴充竴鎴宠姹傚凡杩囨湡锛屼笉鍥炴埑");
             return;
         }
 
         OneBotClient? client = GetClient();
         string? err;
         if (req.IsGroup)
-            err = await CallActionSafeAsync("group_poke", new { group_id = req.GroupId, user_id = req.UserId }, "戳一戳", client);
+            err = await CallActionSafeAsync("group_poke", new { group_id = req.GroupId, user_id = req.UserId }, "鎴充竴鎴?, client);
         else
-            err = await CallActionSafeAsync("friend_poke", new { user_id = req.UserId }, "私聊戳一戳", client);
+            err = await CallActionSafeAsync("friend_poke", new { user_id = req.UserId }, "绉佽亰鎴充竴鎴?, client);
 
         _lastPokeRequest = null;
-        interactor.Poke(err ?? "成功回戳");
+        interactor.Poke(err ?? "鎴愬姛鍥炴埑");
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("转发指定群聊最近N条消息为合并转发消息。无需传消息ID，插件自动从实时缓存取真实消息（纯图片/语音段自动跳过）。count超过缓存可用数时按可用数转")]
+    [Description("杞彂鎸囧畾缇よ亰鏈€杩慛鏉℃秷鎭负鍚堝苟杞彂娑堟伅銆傛棤闇€浼犳秷鎭疘D锛屾彃浠惰嚜鍔ㄤ粠瀹炴椂缂撳瓨鍙栫湡瀹炴秷鎭紙鍚玝ot鑷繁鍙戠殑娑堟伅锛屽彂閫佹椂鑷姩璁板綍锛涚函鍥剧墖/璇煶娈佃嚜鍔ㄨ烦杩囷級銆俢ount瓒呰繃缂撳瓨鍙敤鏁版椂鎸夊彲鐢ㄦ暟杞?)]
     public async Task ForwardRecent(
-        [Description("群号")] long groupId,
-        [Description("转发条数，1-50，默认5")] int count = 5)
+        [Description("缇ゅ彿")] long groupId,
+        [Description("杞彂鏉℃暟锛?-50锛岄粯璁?")] int count = 5)
     {
-        if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
-        if (groupId == 0) { interactor.Poke("groupId不能为0（群号缺失）"); return; }
+        if (!Configuration.ForwardEnabled) { interactor.Poke("鍚堝苟杞彂鍔熻兘宸茬鐢?); return; }
+        if (groupId == 0) { interactor.Poke("groupId涓嶈兘涓?锛堢兢鍙风己澶憋級"); return; }
         OneBotClient? client = GetClient();
-        if (client == null) { interactor.Poke("合并转发失败：QQ客户端不可用"); return; }
+        if (client == null) { interactor.Poke("鍚堝苟杞彂澶辫触锛歈Q瀹㈡埛绔笉鍙敤"); return; }
 
         count = Math.Clamp(count, 1, 50);
         var matches = _liveMessages
@@ -580,7 +613,7 @@ public class QQEnhanceModule(
 
         if (matches.Count == 0)
         {
-            interactor.Poke($"群 {groupId} 暂无实时捕获的消息（捕获连接后开始记录，请稍后重试或改用 SendForwardNew 手动构造）");
+            interactor.Poke($"缇?{groupId} 鏆傛棤瀹炴椂鎹曡幏鐨勬秷鎭紙鎹曡幏杩炴帴鍚庡紑濮嬭褰曪紝璇风◢鍚庨噸璇曟垨鏀圭敤 SendForwardNew 鎵嬪姩鏋勯€狅級");
             return;
         }
 
@@ -589,54 +622,57 @@ public class QQEnhanceModule(
         {
             string content = OneBotSegment.FilterFace(OneBotSegment.FilterAt(OneBotSegment.FilterImage(OneBotSegment.FilterRecord(m.Raw))));
             if (string.IsNullOrWhiteSpace(content)) continue;
-            string name = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname;
+            string name = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "鎴? : m.UserId.ToString()) : m.Nickname;
             nodes.Add(new { type = "node", data = new { name, uin = m.UserId, content } });
         }
 
         if (nodes.Count == 0)
         {
-            interactor.Poke("缓存中的消息无可转发文本内容（可能是纯图片/语音），请稍后重试");
+            interactor.Poke("缂撳瓨涓殑娑堟伅鏃犲彲杞彂鏂囨湰鍐呭锛堝彲鑳芥槸绾浘鐗?璇煶锛夛紝璇风◢鍚庨噸璇?);
             return;
         }
 
         try
         {
-            await client.CallActionAsync<object>("send_group_forward_msg", new { group_id = groupId, messages = nodes });
-            interactor.Poke($"合并转发发送成功（{nodes.Count} 个节点）");
+            var sent = await client.CallActionAsync<SendResult>("send_group_forward_msg", new { group_id = groupId, messages = nodes });
+            long sentId = ExtractSentId(sent);
+            if (sentId != 0)
+                RecordSentMessage(sentId, groupId, 0, $"[CQ:forward,id={sentId}]", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            interactor.Poke($"鍚堝苟杞彂鍙戦€佹垚鍔燂紙{nodes.Count} 涓妭鐐癸級");
         }
         catch (TaskCanceledException)
         {
-            interactor.Poke("合并转发请求超时（10秒），可能已发送成功，请稍后确认，不要重复发送");
+            interactor.Poke("鍚堝苟杞彂璇锋眰瓒呮椂锛?0绉掞級锛屽彲鑳藉凡鍙戦€佹垚鍔燂紝璇风◢鍚庣‘璁わ紝涓嶈閲嶅鍙戦€?);
         }
         catch (Exception e)
         {
-            interactor.Poke($"合并转发失败：{e.Message}");
+            interactor.Poke($"鍚堝苟杞彂澶辫触锛歿e.Message}");
         }
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("引用回复指定用户的最近一条消息。target为该用户的QQ号或昵称，不需要传消息ID，插件从实时捕获缓存自动定位。找不到时返回提示")]
+    [Description("寮曠敤鍥炲鎸囧畾鐢ㄦ埛鐨勬渶杩戜竴鏉℃秷鎭€倀arget涓鸿鐢ㄦ埛鐨凲Q鍙锋垨鏄电О锛屼笉闇€瑕佷紶娑堟伅ID锛屾彃浠朵粠瀹炴椂缂撳瓨鑷姩瀹氫綅锛堝惈bot鑷繁鍙戠殑娑堟伅锛屽彂閫佹椂鑷姩璁板綍锛夈€傛壘涓嶅埌鏃惰繑鍥炴彁绀?)]
     public async Task ReplyRecent(
-        [Description("回复内容")] string message,
-        [Description("目标用户QQ号或昵称")] string target,
-        [Description("消息类型：group或private")] string messageType = "group",
-        [Description("目标群号（group）或QQ号（private）")] long targetId = 0)
+        [Description("鍥炲鍐呭")] string message,
+        [Description("鐩爣鐢ㄦ埛QQ鍙锋垨鏄电О")] string target,
+        [Description("娑堟伅绫诲瀷锛歡roup鎴杙rivate")] string messageType = "group",
+        [Description("鐩爣缇ゅ彿锛坓roup锛夋垨QQ鍙凤紙private锛?)] long targetId = 0)
     {
-        if (!Configuration.ReplyEnabled) { interactor.Poke("引用回复功能已禁用"); return; }
-        if (ShouldDelegate()) { interactor.Poke(DelegateHint("引用回复", "SendReplyMessage")); return; }
-        if (targetId == 0) { interactor.Poke("targetId不能为0"); return; }
+        if (!Configuration.ReplyEnabled) { interactor.Poke("寮曠敤鍥炲鍔熻兘宸茬鐢?); return; }
+        if (ShouldDelegate()) { interactor.Poke(DelegateHint("寮曠敤鍥炲", "SendReplyMessage")); return; }
+        if (targetId == 0) { interactor.Poke("targetId涓嶈兘涓?"); return; }
 
         bool isGroup = messageType == "group";
         var live = FindLatestFromUser(targetId, target, isGroup);
         if (live == null)
         {
-            string scope = isGroup ? $"群 {targetId}" : $"与 {targetId} 的私聊";
-            interactor.Poke($"未在{scope}中找到 {target} 的最近消息（可能不在实时缓存中，改用 QGetMessages 查ID再 SendReplyMessage）");
+            string scope = isGroup ? $"缇?{targetId}" : $"涓?{targetId} 鐨勭鑱?;
+            interactor.Poke($"鏈湪{scope}涓壘鍒?{target} 鐨勬渶杩戞秷鎭紙鍙兘涓嶅湪瀹炴椂缂撳瓨涓紝鏀圭敤 QGetMessages 鏌D鍐?SendReplyMessage锛?);
             return;
         }
 
         OneBotClient? client = GetClient();
-        if (client == null) { interactor.Poke("引用回复失败：QQ客户端不可用"); return; }
+        if (client == null) { interactor.Poke("寮曠敤鍥炲澶辫触锛歈Q瀹㈡埛绔笉鍙敤"); return; }
         try
         {
             object @params;
@@ -644,12 +680,15 @@ public class QQEnhanceModule(
                 @params = new { message_type = "group", group_id = targetId, message, reply = new { message_id = live.MessageId } };
             else
                 @params = new { message_type = "private", user_id = targetId, message, reply = new { message_id = live.MessageId } };
-            await client.CallActionAsync<object>("send_msg", @params);
-            interactor.Poke($"引用回复发送成功（回复了 {target} 的消息 #{live.MessageId}）");
+            var sent = await client.CallActionAsync<SendResult>("send_msg", @params);
+            long sentId = ExtractSentId(sent);
+            if (sentId != 0)
+                RecordSentMessage(sentId, isGroup ? targetId : 0, isGroup ? 0 : targetId, message, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            interactor.Poke($"寮曠敤鍥炲鍙戦€佹垚鍔燂紙鍥炲浜?{target} 鐨勬秷鎭?#{live.MessageId}锛?);
         }
         catch (TaskCanceledException)
         {
-            interactor.Poke("引用回复请求超时（10秒），可能已发送成功，请确认后不要再重复发送");
+            interactor.Poke("寮曠敤鍥炲璇锋眰瓒呮椂锛?0绉掞級锛屽彲鑳藉凡鍙戦€佹垚鍔燂紝璇风‘璁ゅ悗涓嶈鍐嶉噸澶嶅彂閫?);
         }
         catch (Exception e)
         {
@@ -660,16 +699,16 @@ public class QQEnhanceModule(
                     await client.SendGroupMessage(targetId, fallback);
                 else
                     await client.SendPrivateMessage(targetId, fallback);
-                interactor.Poke($"引用回复发送成功（CQ码方式，结构化参数不可用：{e.Message}）");
+                interactor.Poke($"寮曠敤鍥炲鍙戦€佹垚鍔燂紙CQ鐮佹柟寮忥紝缁撴瀯鍖栧弬鏁颁笉鍙敤锛歿e.Message}锛?);
             }
             catch (Exception e2)
             {
-                interactor.Poke($"引用回复失败：结构化参数失败（{e.Message}），CQ码回退也失败（{e2.Message}）");
+                interactor.Poke($"寮曠敤鍥炲澶辫触锛氱粨鏋勫寲鍙傛暟澶辫触锛坽e.Message}锛夛紝CQ鐮佸洖閫€涔熷け璐ワ紙{e2.Message}锛?);
             }
         }
     }
 
-    /// <summary>从实时缓存中定位目标用户最近一条消息。target为纯数字按QQ号精确匹配，否则按昵称包含匹配</summary>
+    /// <summary>浠庡疄鏃剁紦瀛樹腑瀹氫綅鐩爣鐢ㄦ埛鏈€杩戜竴鏉℃秷鎭€倀arget涓虹函鏁板瓧鎸塓Q鍙风簿纭尮閰嶏紝鍚﹀垯鎸夋樀绉板寘鍚尮閰?/summary>
     private LiveMessage? FindLatestFromUser(long targetScope, string target, bool isGroup)
     {
         bool byId = long.TryParse(target.Trim(), out long targetUin);
@@ -683,66 +722,69 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("转发一条已有的合并转发消息到群聊。forwardId为合并转发消息ID（必须来自getmessages，可为负数）")]
+    [Description("杞彂涓€鏉″凡鏈夌殑鍚堝苟杞彂娑堟伅鍒扮兢鑱娿€俧orwardId涓哄悎骞惰浆鍙戞秷鎭疘D锛堝繀椤绘潵鑷猤etmessages锛屽彲涓鸿礋鏁帮級")]
     public async Task SendForwardById(
-        [Description("群号")] long groupId,
-        [Description("合并转发消息ID（必须来自getmessages）")] long forwardId)
+        [Description("缇ゅ彿")] long groupId,
+        [Description("鍚堝苟杞彂娑堟伅ID锛堝繀椤绘潵鑷猤etmessages锛?)] long forwardId)
     {
-        if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
+        if (!Configuration.ForwardEnabled) { interactor.Poke("鍚堝苟杞彂鍔熻兘宸茬鐢?); return; }
         OneBotClient? client = GetClient();
-        if (client == null) { interactor.Poke("合并转发失败：QQ客户端不可用"); return; }
+        if (client == null) { interactor.Poke("鍚堝苟杞彂澶辫触锛歈Q瀹㈡埛绔笉鍙敤"); return; }
         try
         {
             string message = $"[CQ:forward,id={forwardId}]";
-            await client.SendGroupMessage(groupId, message);
-            interactor.Poke("合并转发发送成功");
+            var sent = await client.CallActionAsync<SendResult>("send_group_msg", new { group_id = groupId, message });
+            long sentId = ExtractSentId(sent);
+            if (sentId != 0)
+                RecordSentMessage(sentId, groupId, 0, message, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            interactor.Poke("鍚堝苟杞彂鍙戦€佹垚鍔?);
         }
         catch (TaskCanceledException)
         {
-            interactor.Poke("合并转发请求超时（10秒），可能已发送成功，请稍后确认，不要重复发送");
+            interactor.Poke("鍚堝苟杞彂璇锋眰瓒呮椂锛?0绉掞級锛屽彲鑳藉凡鍙戦€佹垚鍔燂紝璇风◢鍚庣‘璁わ紝涓嶈閲嶅鍙戦€?);
         }
         catch (Exception e)
         {
-            interactor.Poke($"合并转发失败：{e.Message}");
+            interactor.Poke($"鍚堝苟杞彂澶辫触锛歿e.Message}");
         }
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("构造并发送新的合并转发消息到群聊。nodesJson为JSON数组，每个节点两种格式：{\"name\":\"昵称\",\"uin\":QQ号,\"content\":\"内容\"}（自定义内容）或 {\"id\":真实消息ID}（引用真实消息，id必须来自getmessages，数字或数字字符串均可）。⚠必须传完整合法的JSON数组，最外层用[]包裹，不要漏收尾括号")]
+    [Description("鏋勯€犲苟鍙戦€佹柊鐨勫悎骞惰浆鍙戞秷鎭埌缇よ亰銆俷odesJson涓篔SON鏁扮粍锛屾瘡涓妭鐐逛袱绉嶆牸寮忥細{\"name\":\"鏄电О\",\"uin\":QQ鍙?\"content\":\"鍐呭\"}锛堣嚜瀹氫箟鍐呭锛夋垨 {\"id\":鐪熷疄娑堟伅ID}锛堝紩鐢ㄧ湡瀹炴秷鎭紝id蹇呴』鏉ヨ嚜getmessages锛屾暟瀛楁垨鏁板瓧瀛楃涓插潎鍙級銆傗殸蹇呴』浼犲畬鏁村悎娉曠殑JSON鏁扮粍锛屾渶澶栧眰鐢╗]鍖呰９锛屼笉瑕佹紡鏀跺熬鎷彿")]
     public async Task SendForwardNew(
-        [Description("群号")] long groupId,
-        [Description("节点JSON数组（必须是完整合法的JSON，[]闭合）")] string nodesJson)
+        [Description("缇ゅ彿")] long groupId,
+        [Description("鑺傜偣JSON鏁扮粍锛堝繀椤绘槸瀹屾暣鍚堟硶鐨凧SON锛孾]闂悎锛?)] string nodesJson)
     {
-        if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
+        if (!Configuration.ForwardEnabled) { interactor.Poke("鍚堝苟杞彂鍔熻兘宸茬鐢?); return; }
         OneBotClient? client = GetClient();
-        if (client == null) { interactor.Poke("合并转发失败：QQ客户端不可用"); return; }
+        if (client == null) { interactor.Poke("鍚堝苟杞彂澶辫触锛歈Q瀹㈡埛绔笉鍙敤"); return; }
         try
         {
-            // 容错：去掉首尾多余空白；若AI漏了收尾括号，尝试补全（最多补一层 ]）
+            // 瀹归敊锛氬幓鎺夐灏惧浣欑┖鐧斤紱鑻I婕忎簡鏀跺熬鎷彿锛屽皾璇曡ˉ鍏紙鏈€澶氳ˉ涓€灞?]锛?
             string json = nodesJson.Trim();
             try
             {
                 using var doc = JsonDocument.Parse(json);
                 if (doc.RootElement.ValueKind != JsonValueKind.Array)
-                    throw new Exception("nodesJson必须为JSON数组");
+                    throw new Exception("nodesJson蹇呴』涓篔SON鏁扮粍");
             }
             catch (JsonException)
             {
                 string? repaired = RepairJsonArray(json);
                 if (repaired == null)
-                    throw new JsonException("nodesJson不是合法JSON数组（检查是否漏了收尾括号或引号未闭合）。正确示例：[{\"name\":\"昵称\",\"uin\":123456,\"content\":\"内容\"},{\"id\":-1234567890}]");
+                    throw new JsonException("nodesJson涓嶆槸鍚堟硶JSON鏁扮粍锛堟鏌ユ槸鍚︽紡浜嗘敹灏炬嫭鍙锋垨寮曞彿鏈棴鍚堬級銆傛纭ず渚嬶細[{\"name\":\"鏄电О\",\"uin\":123456,\"content\":\"鍐呭\"},{\"id\":-1234567890}]");
                 json = repaired;
             }
 
             using var doc2 = JsonDocument.Parse(json);
             if (doc2.RootElement.ValueKind != JsonValueKind.Array)
-                throw new Exception("nodesJson必须为JSON数组");
+                throw new Exception("nodesJson蹇呴』涓篔SON鏁扮粍");
 
             var nodes = new List<object>();
             foreach (JsonElement node in doc2.RootElement.EnumerateArray())
             {
                 if (node.ValueKind != JsonValueKind.Object)
-                    throw new Exception("每个节点必须是JSON对象，请检查是否漏了花括号");
+                    throw new Exception("姣忎釜鑺傜偣蹇呴』鏄疛SON瀵硅薄锛岃妫€鏌ユ槸鍚︽紡浜嗚姳鎷彿");
 
                 bool hasId = node.TryGetProperty("id", out var idElem) &&
                              (idElem.ValueKind == JsonValueKind.Number ||
@@ -763,22 +805,25 @@ public class QQEnhanceModule(
                 }
             }
             if (nodes.Count == 0)
-                throw new Exception("节点列表为空");
+                throw new Exception("鑺傜偣鍒楄〃涓虹┖");
 
-            await client.CallActionAsync<object>("send_group_forward_msg", new { group_id = groupId, messages = nodes });
-            interactor.Poke($"合并转发发送成功（{nodes.Count} 个节点）");
+            var sent = await client.CallActionAsync<SendResult>("send_group_forward_msg", new { group_id = groupId, messages = nodes });
+            long sentId = ExtractSentId(sent);
+            if (sentId != 0)
+                RecordSentMessage(sentId, groupId, 0, $"[CQ:forward,id={sentId}]", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            interactor.Poke($"鍚堝苟杞彂鍙戦€佹垚鍔燂紙{nodes.Count} 涓妭鐐癸級");
         }
         catch (TaskCanceledException)
         {
-            interactor.Poke("合并转发请求超时（10秒），可能已发送成功。请稍后确认，不要重复发送");
+            interactor.Poke("鍚堝苟杞彂璇锋眰瓒呮椂锛?0绉掞級锛屽彲鑳藉凡鍙戦€佹垚鍔熴€傝绋嶅悗纭锛屼笉瑕侀噸澶嶅彂閫?);
         }
         catch (Exception e)
         {
-            interactor.Poke($"合并转发失败：{e.Message}");
+            interactor.Poke($"鍚堝苟杞彂澶辫触锛歿e.Message}");
         }
     }
 
-    /// <summary>修复AI生成的残缺JSON数组：只允许补全缺失的收尾括号，不允许修改内容。返回修复后的JSON，无法修复时返回null</summary>
+    /// <summary>淇AI鐢熸垚鐨勬畫缂篔SON鏁扮粍锛氬彧鍏佽琛ュ叏缂哄け鐨勬敹灏炬嫭鍙凤紝涓嶅厑璁镐慨鏀瑰唴瀹广€傝繑鍥炰慨澶嶅悗鐨凧SON锛屾棤娉曚慨澶嶆椂杩斿洖null</summary>
     private static string? RepairJsonArray(string json)
     {
         string s = json.Trim();
@@ -819,44 +864,48 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("发送音乐卡片到QQ聊天。⚠QQ平台音乐卡片请求可能较慢（>10秒），若提示超时请稍后用getmessages确认是否已发出，不要重复发送")]
+    [Description("鍙戦€侀煶涔愬崱鐗囧埌QQ鑱婂ぉ銆傗殸QQ骞冲彴闊充箰鍗＄墖璇锋眰鍙兘杈冩參锛?10绉掞級锛岃嫢鎻愮ず瓒呮椂璇风◢鍚庣敤getmessages纭鏄惁宸插彂鍑猴紝涓嶈閲嶅鍙戦€?)]
     public async Task SendMusicCard(
-        [Description("目标QQ号(私聊)或群号(群聊)")] long targetId,
-        [Description("消息类型：private或group")] string type,
-        [Description("音乐平台(qq/163/kugou/migu/kuwo)")] string platform,
-        [Description("音乐ID")] string musicId)
+        [Description("鐩爣QQ鍙?绉佽亰)鎴栫兢鍙?缇よ亰)")] long targetId,
+        [Description("娑堟伅绫诲瀷锛歱rivate鎴杇roup")] string type,
+        [Description("闊充箰骞冲彴(qq/163/kugou/migu/kuwo)")] string platform,
+        [Description("闊充箰ID")] string musicId)
     {
-        if (!Configuration.MusicCardEnabled) { interactor.Poke("音乐卡片功能已禁用"); return; }
+        if (!Configuration.MusicCardEnabled) { interactor.Poke("闊充箰鍗＄墖鍔熻兘宸茬鐢?); return; }
         OneBotClient? client = GetClient();
-        if (client == null) { interactor.Poke("音乐卡片发送失败：QQ客户端不可用"); return; }
+        if (client == null) { interactor.Poke("闊充箰鍗＄墖鍙戦€佸け璐ワ細QQ瀹㈡埛绔笉鍙敤"); return; }
         try
         {
             string message = $"[CQ:music,type={platform},id={musicId}]";
+            SendResult? sent;
             if (type == "group")
-                await client.SendGroupMessage(targetId, message);
+                sent = await client.CallActionAsync<SendResult>("send_group_msg", new { group_id = targetId, message });
             else
-                await client.SendPrivateMessage(targetId, message);
-            interactor.Poke("音乐卡片发送成功");
+                sent = await client.CallActionAsync<SendResult>("send_private_msg", new { user_id = targetId, message });
+            long sentId = ExtractSentId(sent);
+            if (sentId != 0)
+                RecordSentMessage(sentId, type == "group" ? targetId : 0, type == "group" ? 0 : targetId, message, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            interactor.Poke("闊充箰鍗＄墖鍙戦€佹垚鍔?);
         }
         catch (TaskCanceledException)
         {
-            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。QQ服务器可能仍在后台处理，卡片可能稍后出现；请用GetMessages确认，不要重复发送。若持续超时请检查musicId是否有效");
+            interactor.Poke("闊充箰鍗＄墖璇锋眰瓒呮椂锛?0绉掓湭鏀跺埌OneBot鍝嶅簲锛夈€俀Q鏈嶅姟鍣ㄥ彲鑳戒粛鍦ㄥ悗鍙板鐞嗭紝鍗＄墖鍙兘绋嶅悗鍑虹幇锛涜鐢℅etMessages纭锛屼笉瑕侀噸澶嶅彂閫併€傝嫢鎸佺画瓒呮椂璇锋鏌usicId鏄惁鏈夋晥");
         }
         catch (Exception e)
         {
-            interactor.Poke($"音乐卡片发送失败：{e.Message}");
+            interactor.Poke($"闊充箰鍗＄墖鍙戦€佸け璐ワ細{e.Message}");
         }
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("获取群聊/私聊最近消息及每条消息的消息ID，用于定位要撤回(DeleteMsg)/贴表情(SetEmoji)/引用回复(SendReplyMessage)或转发(SendForwardById)的消息。群聊传groupId；私聊传groupId=0并传userId。仅返回实时捕获的真实ID（含自己刚发的消息），返回格式：[消息ID:xxx]")]
+    [Description("鑾峰彇缇よ亰/绉佽亰鏈€杩戞秷鎭強姣忔潯娑堟伅鐨勬秷鎭疘D锛岀敤浜庡畾浣嶈鎾ゅ洖(DeleteMsg)/璐磋〃鎯?SetEmoji)/寮曠敤鍥炲(SendReplyMessage)鎴栬浆鍙?SendForwardById)鐨勬秷鎭€傜兢鑱婁紶groupId锛涚鑱婁紶groupId=0骞朵紶userId銆傝繑鍥炲疄鏃舵崟鑾风殑鐪熷疄ID锛堝惈鑷繁鍒氬彂鐨勬秷鎭紝鍙戦€佹椂鑷姩璁板綍锛夛紝杩斿洖鏍煎紡锛歔娑堟伅ID:xxx]")]
     public async Task QGetMessages(
-        [Description("群号（私聊时传0）")] long groupId,
-        [Description("QQ号（仅私聊时需要）")] long userId = 0,
-        [Description("获取条数，1-50，默认10")] int count = 10)
+        [Description("缇ゅ彿锛堢鑱婃椂浼?锛?)] long groupId,
+        [Description("QQ鍙凤紙浠呯鑱婃椂闇€瑕侊級")] long userId = 0,
+        [Description("鑾峰彇鏉℃暟锛?-50锛岄粯璁?0")] int count = 10)
     {
         OneBotClient? client = GetClient();
-        if (client == null) { interactor.Poke("获取消息失败：QQ客户端不可用"); return; }
+        if (client == null) { interactor.Poke("鑾峰彇娑堟伅澶辫触锛歈Q瀹㈡埛绔笉鍙敤"); return; }
         try
         {
             count = Math.Clamp(count, 1, 50);
@@ -872,20 +921,20 @@ public class QQEnhanceModule(
             if (cacheMatches.Count == 0)
             {
                 interactor.Poke(groupId != 0
-                    ? $"群 {groupId} 暂无实时捕获的消息记录（实时捕获连接后开始记录，请稍后重试；若持续为空请检查实时消息捕获配置与OneBot连接）"
-                    : $"与 {userId} 暂无实时捕获的消息记录（实时捕获连接后开始记录，请稍后重试）");
+                    ? $"缇?{groupId} 鏆傛棤瀹炴椂鎹曡幏鐨勬秷鎭褰曪紙瀹炴椂鎹曡幏杩炴帴鍚庡紑濮嬭褰曪紝璇风◢鍚庨噸璇曪紱鑻ユ寔缁负绌鸿妫€鏌ュ疄鏃舵秷鎭崟鑾烽厤缃笌OneBot杩炴帴锛?
+                    : $"涓?{userId} 鏆傛棤瀹炴椂鎹曡幏鐨勬秷鎭褰曪紙瀹炴椂鎹曡幏杩炴帴鍚庡紑濮嬭褰曪紝璇风◢鍚庨噸璇曪級");
                 return;
             }
 
             var sb = new StringBuilder();
-            string target = groupId != 0 ? $"群 {groupId}" : $"与 {userId}";
-            sb.AppendLine($"{target} 最近 {cacheMatches.Count} 条消息（[消息ID:xxx]即真实ID，可为负数，直接用于操作）：");
+            string target = groupId != 0 ? $"缇?{groupId}" : $"涓?{userId}";
+            sb.AppendLine($"{target} 鏈€杩?{cacheMatches.Count} 鏉℃秷鎭紙[娑堟伅ID:xxx]鍗崇湡瀹濱D锛屽彲涓鸿礋鏁帮紝鐩存帴鐢ㄤ簬鎿嶄綔锛夛細");
             foreach (var m in cacheMatches)
             {
-                string nick = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname;
+                string nick = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "鎴? : m.UserId.ToString()) : m.Nickname;
                 string raw = OneBotSegment.FilterFace(OneBotSegment.FilterAt(OneBotSegment.FilterImage(OneBotSegment.FilterRecord(m.Raw))));
                 DateTime time = DateTimeOffset.FromUnixTimeSeconds(m.Time).LocalDateTime;
-                lines.Add($"[{time:HH:mm:ss}] {m.UserId}({nick}) [消息ID:{m.MessageId}] {raw}");
+                lines.Add($"[{time:HH:mm:ss}] {m.UserId}({nick}) [娑堟伅ID:{m.MessageId}] {raw}");
             }
             foreach (string line in lines)
                 sb.AppendLine(line);
@@ -893,11 +942,11 @@ public class QQEnhanceModule(
         }
         catch (Exception e)
         {
-            interactor.Poke($"获取消息失败：{e.Message}");
+            interactor.Poke($"鑾峰彇娑堟伅澶辫触锛歿e.Message}");
         }
     }
 
-    // ==================== notice 感知 ====================
+    // ==================== notice 鎰熺煡 ====================
 
     private sealed class GroupInfoData
     {
@@ -923,9 +972,9 @@ public class QQEnhanceModule(
                     string subType = noticeEvent.SubType ?? "";
                     string groupInfo = await GetGroupInfoText(noticeEvent.GroupId);
                     if (subType == "ban")
-                        interactor.Poke($"[System 你被禁言了（{groupInfo}）]");
+                        interactor.Poke($"[System 浣犺绂佽█浜嗭紙{groupInfo}锛塢");
                     else if (subType == "lift_ban")
-                        interactor.Poke($"[System 你被解除禁言了（{groupInfo}）]");
+                        interactor.Poke($"[System 浣犺瑙ｉ櫎绂佽█浜嗭紙{groupInfo}锛塢");
                 }
             }
             else if (noticeType == "group_increase" && Configuration.PerceiveGroupIncrease)
@@ -933,10 +982,10 @@ public class QQEnhanceModule(
                 long userId = noticeEvent.UserId;
                 string userName = await GetQQUserName(userId, noticeEvent.GroupId);
                 string userText = string.IsNullOrEmpty(userName)
-                    ? $"用户{userId}"
-                    : $"用户{userId}({userName})";
+                    ? $"鐢ㄦ埛{userId}"
+                    : $"鐢ㄦ埛{userId}({userName})";
                 string groupInfo = await GetGroupInfoText(noticeEvent.GroupId);
-                interactor.Poke($"[System {userText}加入了群聊（{groupInfo}）]");
+                interactor.Poke($"[System {userText}鍔犲叆浜嗙兢鑱婏紙{groupInfo}锛塢");
             }
             else if (noticeType == "notify" && noticeEvent.SubType == "poke" && Configuration.PokeDecideEnabled)
             {
@@ -944,35 +993,35 @@ public class QQEnhanceModule(
                 if (oneBotEvent is OneBotPokeEvent pokeEvent)
                     targetId = pokeEvent.TargetId;
 
-                // 只处理自己被戳
+                // 鍙鐞嗚嚜宸辫鎴?
                 if (targetId != 0 && targetId != noticeEvent.SelfId) return;
 
                 bool isGroup = noticeEvent.GroupId != 0;
                 _lastPokeRequest = new PokeRequest(noticeEvent.UserId, noticeEvent.GroupId, isGroup, DateTime.Now);
 
-                // 冷却期内不重复注入，避免连续戳一戳刷屏上下文
+                // 鍐峰嵈鏈熷唴涓嶉噸澶嶆敞鍏ワ紝閬垮厤杩炵画鎴充竴鎴冲埛灞忎笂涓嬫枃
                 if (DateTime.Now - _lastPokePromptTime < PokePromptCooldown) return;
                 _lastPokePromptTime = DateTime.Now;
 
                 string userName = await GetQQUserName(noticeEvent.UserId, noticeEvent.GroupId);
                 string userText = string.IsNullOrEmpty(userName)
-                    ? $"用户{noticeEvent.UserId}"
-                    : $"用户{noticeEvent.UserId}({userName})";
-                string where = isGroup ? $"在群 {noticeEvent.GroupId} 戳了戳你" : "私聊戳了戳你";
-                interactor.Poke($"[System {userText} {where}。你可以输出 <PokeBack decide=\"yes\"/> 回戳，或 <PokeBack decide=\"no\"/> 忽略]");
+                    ? $"鐢ㄦ埛{noticeEvent.UserId}"
+                    : $"鐢ㄦ埛{noticeEvent.UserId}({userName})";
+                string where = isGroup ? $"鍦ㄧ兢 {noticeEvent.GroupId} 鎴充簡鎴充綘" : "绉佽亰鎴充簡鎴充綘";
+                interactor.Poke($"[System {userText} {where}銆備綘鍙互杈撳嚭 <PokeBack decide=\"yes\"/> 鍥炴埑锛屾垨 <PokeBack decide=\"no\"/> 蹇界暐]");
             }
         }
         catch (Exception e)
         {
-            logger.LogError(e, "感知notice事件失败");
+            logger.LogError(e, "鎰熺煡notice浜嬩欢澶辫触");
         }
     }
 
     private async Task<string> GetGroupInfoText(long groupId)
     {
-        if (groupId == 0) return "群号:未知";
+        if (groupId == 0) return "缇ゅ彿:鏈煡";
         string name = await GetGroupNameAsync(groupId);
-        return string.IsNullOrEmpty(name) ? $"群号:{groupId}" : $"群号:{groupId} 群名:{name}";
+        return string.IsNullOrEmpty(name) ? $"缇ゅ彿:{groupId}" : $"缇ゅ彿:{groupId} 缇ゅ悕:{name}";
     }
 
     private async Task<string> GetGroupNameAsync(long groupId)
@@ -989,7 +1038,7 @@ public class QQEnhanceModule(
         }
         catch (Exception e)
         {
-            logger.LogWarning(e, "获取群名失败: {GroupId}", groupId);
+            logger.LogWarning(e, "鑾峰彇缇ゅ悕澶辫触: {GroupId}", groupId);
             return "";
         }
     }
@@ -1019,7 +1068,7 @@ public class QQEnhanceModule(
         }
         catch (Exception e)
         {
-            logger.LogWarning(e, "获取QQ用户名失败: {UserId}", userId);
+            logger.LogWarning(e, "鑾峰彇QQ鐢ㄦ埛鍚嶅け璐? {UserId}", userId);
             return "";
         }
     }
@@ -1028,7 +1077,7 @@ public class QQEnhanceModule(
 
     private void OnChatSent(string message)
     {
-        var match = Regex.Match(message, @"\[私聊消息\((\d+)");
+        var match = Regex.Match(message, @"\[绉佽亰娑堟伅\((\d+)");
         if (!match.Success) return;
 
         long userId = long.Parse(match.Groups[1].Value);
@@ -1089,7 +1138,7 @@ public class QQEnhanceModule(
         catch (TaskCanceledException) { }
         catch (Exception e)
         {
-            logger.LogDebug(e, "Typing indicator 发送失败");
+            logger.LogDebug(e, "Typing indicator 鍙戦€佸け璐?);
         }
         finally
         {
