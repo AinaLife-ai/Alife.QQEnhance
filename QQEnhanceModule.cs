@@ -44,8 +44,12 @@ public class QQEnhanceConfig
     public bool MusicCardEnabled { get; set; } = true;
 
     [DisplayName("音乐卡片样式")]
-    [Description("163=网易云官方卡片（推荐）；record=直接发语音条（网易云直链，完全不依赖签名，任何端可播，卡片异常时的保底）；json=QQ分享卡片；custom=自定义音乐段。后三种在NapCat未配置musicSignUrl时接收方可能显示\"发送者版本过低\"")]
+    [Description("163=网易云卡片（需签名服务，见下）；record=直接发语音条（网易云直链，完全不依赖签名，任何端可播，卡片异常时的保底）；json=QQ分享卡片；custom=自定义音乐段。除record外所有卡片都必须经过签名服务，签名服务异常或卡片版本过期时接收方会显示\"发送者版本过低\"")]
     public string MusicCardStyle { get; set; } = "163";
+
+    [DisplayName("音乐签名服务地址")]
+    [Description("可选。填入后由插件直接完成卡片签名再发送，不再依赖NapCat的musicSignUrl配置（NapCat默认用 ss.xingzhige.com 公共签名，该服务不稳定或卡片版本过期时接收方会显示\"发送者版本过低\"）。例如自建或第三方签名服务地址。留空=交给NapCat处理")]
+    public string MusicSignUrl { get; set; } = "";
 
     [DisplayName("互动提示")]
     [Description("收到QQ消息时在消息末尾附加互动提示（类似官方消息过滤的注入机制），提醒AI可以随手贴表情/引用/戳一戳/点赞")]
@@ -1269,7 +1273,7 @@ public class QQEnhanceModule(
         s.Replace("&", "&amp;").Replace("[", "&#91;").Replace("]", "&#93;").Replace(",", "&#44;");
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("发送音乐到QQ聊天（点歌）。platform=search musicId=歌名关键词（如 晴天 周杰伦）即可，默认发网易云官方卡片。若接收方显示\"发送者版本过低\"，说明 NapCat 未配置 musicSignUrl，可在插件配置把 音乐卡片样式 改为 record（直接发语音条，任何端可播）。旧用法 platform=163 + 网易云歌曲ID 也可。⚠发送可能较慢（>10秒），超时后请先用 QGetMessages 确认，不要重复发送")]
+    [Description("发送音乐到QQ聊天（点歌）。platform=search musicId=歌名关键词（如 晴天 周杰伦）即可，默认发网易云卡片。若接收方显示\"发送者版本过低\"，说明签名服务不可用或卡片版本过期——可在插件配置填 音乐签名服务地址，或把 音乐卡片样式 改为 record（直接发语音条，任何端可播，100%不受签名影响）。旧用法 platform=163 + 网易云歌曲ID 也可。⚠发送可能较慢（>10秒），超时后请先用 QGetMessages 确认，不要重复发送")]
     public async Task SendMusicCard(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("消息类型：private或group")] string type,
@@ -1343,9 +1347,24 @@ public class QQEnhanceModule(
                 }
                 default:
                 {
-                    // 默认：网易云官方卡片（结构化 music 消息段，NapCat 用官方 appid 生成）
-                    // 若接收方仍显示"发送者版本过低"，说明 NapCat 未配置 musicSignUrl 签名，
-                    // 请在 NapCat WebUI 配置 musicSignUrl，或改用 record 语音条样式
+                    // 默认：网易云卡片。真相：NapCat 对一切 music 段（含163）都强制走签名服务
+                    // （musicSignUrl，缺省用 ss.xingzhige.com 公共签名），签名服务异常或卡片版本
+                    // 过期时接收方就显示"发送者版本过低"。这里若用户配置了插件侧签名地址，
+                    // 就由插件直接签名拿到卡片JSON、以json段发送，绕开 NapCat 的配置。
+                    string signUrl = Configuration.MusicSignUrl?.Trim() ?? "";
+                    if (signUrl.Length > 0)
+                    {
+                        string signedJson = await SignMusicCardAsync(signUrl, "163", ncmId.ToString());
+                        if (signedJson != null)
+                        {
+                            // 与 NapCat 内部做法一致：签名结果作为 json 消息段直接发送
+                            message = new object[] {
+                                new { type = "json", data = new { data = signedJson } }
+                            };
+                            break;
+                        }
+                        interactor.Poke($"插件侧签名服务 {signUrl} 请求失败，回退交给 NapCat 处理");
+                    }
                     message = new object[] {
                         new { type = "music", data = new { type = "163", id = ncmId.ToString() } }
                     };
@@ -1373,6 +1392,33 @@ public class QQEnhanceModule(
     }
 
     /// <summary>关键词 → 网易云歌曲ID（官方web搜索 → 163api → meting 兜底）</summary>
+    /// <summary>请求音乐签名服务（与 NapCat 同一协议：POST {type,id}，返回卡片JSON字符串）。失败返回null</summary>
+    private static async Task<string?> SignMusicCardAsync(string signUrl, string type, string id)
+    {
+        try
+        {
+            using var content = new StringContent(
+                JsonSerializer.Serialize(new { type, id }), Encoding.UTF8, "application/json");
+            using var resp = await _http.PostAsync(signUrl, content);
+            if (!resp.IsSuccessStatusCode) return null;
+            string body = (await resp.Content.ReadAsStringAsync()).Trim();
+            // 签名服务应返回卡片JSON；有的实现包了一层 {"data": "..."}，做兼容
+            if (body.StartsWith("{"))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(body);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                        doc.RootElement.TryGetProperty("data", out var d) && d.ValueKind == JsonValueKind.String)
+                        return d.GetString();
+                }
+                catch { /* 按原始字符串处理 */ }
+            }
+            return body.Length > 10 ? body : null;
+        }
+        catch { return null; }
+    }
+
     private static async Task<long> SearchNetEaseIdAsync(string keyword)
     {
         // 1. 网易云官方 web 搜索
