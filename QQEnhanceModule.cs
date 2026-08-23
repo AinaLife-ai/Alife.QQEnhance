@@ -43,8 +43,21 @@ public class QQEnhanceConfig
     public bool MusicCardEnabled { get; set; } = true;
 
     [DisplayName("音乐卡片样式")]
-    [Description("163=网易云官方卡片（推荐，免签名全端可渲染）；custom=自定义音乐段（需NapCat配置musicSignUrl签名，否则接收方显示\"发送者版本过低\"，仅供高级用户）")]
+    [Description("163=网易云官方卡片（推荐）；record=直接发语音条（网易云直链，完全不依赖签名，任何端可播，卡片异常时的保底）；json=QQ分享卡片；custom=自定义音乐段。后三种在NapCat未配置musicSignUrl时接收方可能显示\"发送者版本过低\"")]
     public string MusicCardStyle { get; set; } = "163";
+
+    [DisplayName("互动提示")]
+    [Description("收到QQ消息时在消息末尾附加互动提示（类似官方消息过滤的注入机制），提醒AI可以随手贴表情/引用/戳一戳/点赞")]
+    public bool InteractionHintEnabled { get; set; } = true;
+
+    [DisplayName("互动提示概率(%)")]
+    [Description("每条QQ消息附加互动提示的概率，0-100，默认100（每次都提示）")]
+    public int InteractionHintProbability { get; set; } = 100;
+
+    [DisplayName("互动提示文本")]
+    [Description("附加在消息末尾的提示内容，可自定义")]
+    public string InteractionHintText { get; set; } =
+        "(可随手互动：SetEmojiRecent贴表情 / ReplyRecent引用回复 / PokeGroupMember或PokePrivateMember戳一戳 / SendQQLikes点赞——它们都是完整的回应，无需请示，也不用特意说明)";
 
     [DisplayName("戳一戳")]
     [Description("启用戳一戳功能（群聊/私聊）")]
@@ -591,6 +604,11 @@ public class QQEnhanceModule(
             ChatBot.ChatOver += OnChatOver;
         }
 
+        // 互动提示：挂到官方消息过滤同款钩子（ChatBot.ChatSend），收到QQ消息时按概率附加提示
+        if (Configuration.InteractionHintEnabled)
+            ChatBot.ChatSent -= OnChatSent; // 无操作，仅防误用
+        ChatBot.ChatSend += OnChatSendHint;
+
         if (Configuration.LiveCaptureEnabled)
             _ = LiveCaptureMainAsync(client, DestroyCancellationToken);
 
@@ -605,6 +623,7 @@ public class QQEnhanceModule(
 
         ChatBot.ChatSent -= OnChatSent;
         ChatBot.ChatOver -= OnChatOver;
+        ChatBot.ChatSend -= OnChatSendHint;
 
         lock (_typingLock)
         {
@@ -702,7 +721,7 @@ public class QQEnhanceModule(
         if (!Configuration.EmojiReactEnabled) { interactor.Poke("贴表情功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("贴表情", "SendEmojiLike")); return; }
         OneBotClient? client = GetClient();
-        string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = messageId, emoji_id = emojiId }, "贴表情", client);
+        string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = messageId, emoji_id = emojiId.ToString(), set = true }, "贴表情", client);
         interactor.Poke(err ?? "贴表情成功");
     }
 
@@ -721,7 +740,7 @@ public class QQEnhanceModule(
         if (msg == null) { interactor.Poke(error!); return; }
 
         OneBotClient? client = GetClient();
-        string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = msg.MessageId, emoji_id = emojiId }, "贴表情", client);
+        string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = msg.MessageId, emoji_id = emojiId.ToString(), set = true }, "贴表情", client);
         interactor.Poke(err ?? $"已给 {target} 的消息贴表情（#{msg.MessageId}）");
     }
 
@@ -882,7 +901,7 @@ public class QQEnhanceModule(
         if (client == null) return "引用回复失败：QQ客户端不可用";
 
         object[] msgArr = [
-            new { type = "reply", data = new { id = replyToId } },
+            new { type = "reply", data = new { id = replyToId.ToString() } },
             new { type = "text", data = new { text = message } }
         ];
         try
@@ -1018,7 +1037,7 @@ public class QQEnhanceModule(
             return;
         }
 
-        var nodes = matches.Select(m => (object)new { type = "node", data = new { id = m.MessageId } }).ToList();
+        var nodes = matches.Select(m => (object)new { type = "node", data = new { id = m.MessageId.ToString() } }).ToList();
         var (ok, text) = await SendForwardCoreAsync(isGroup, targetId, nodes);
         if (!ok && !text.StartsWith("合并转发请求超时"))
         {
@@ -1027,7 +1046,7 @@ public class QQEnhanceModule(
                 type = "node",
                 data = new {
                     name = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname,
-                    uin = m.UserId,
+                    uin = m.UserId.ToString(),
                     content = m.Raw
                 }
             }).ToList();
@@ -1051,7 +1070,7 @@ public class QQEnhanceModule(
         [Description("消息类型：group或private，默认group")] string messageType = "group")
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
-        var nodes = new List<object> { new { type = "node", data = new { id = forwardId } } };
+        var nodes = new List<object> { new { type = "node", data = new { id = forwardId.ToString() } } };
         var (_, text) = await SendForwardCoreAsync(messageType != "private", targetId, nodes);
         interactor.Poke(text);
     }
@@ -1103,7 +1122,7 @@ public class QQEnhanceModule(
                     // 校验：id 必须在缓存中存在（编造/过期ID会被NapCat静默跳过，全部跳过则整条转发失败）
                     if (!_liveById.ContainsKey(id))
                         missingIds.Add(id);
-                    nodes.Add(new { type = "node", data = new { id } });
+                    nodes.Add(new { type = "node", data = new { id = id.ToString() } });
                 }
                 else
                 {
@@ -1111,7 +1130,7 @@ public class QQEnhanceModule(
                     long uin = node.TryGetProperty("uin", out var u) && u.ValueKind == JsonValueKind.Number ? u.GetInt64()
                         : (node.TryGetProperty("uin", out var u2) && u2.ValueKind == JsonValueKind.String && long.TryParse(u2.GetString(), out var u3) ? u3 : 0);
                     string content = node.TryGetProperty("content", out var c) ? c.GetString() ?? "" : "";
-                    nodes.Add(new { type = "node", data = new { name, uin, content } });
+                    nodes.Add(new { type = "node", data = new { name, uin = uin.ToString(), content } });
                 }
             }
             if (nodes.Count == 0)
@@ -1181,7 +1200,7 @@ public class QQEnhanceModule(
         s.Replace("&", "&amp;").Replace("[", "&#91;").Replace("]", "&#93;").Replace(",", "&#44;");
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("发送音乐卡片到QQ聊天（点歌）。platform=search musicId=歌名关键词（如 晴天 周杰伦）即可，默认发送网易云官方卡片，接收方任何QQ版本都能正常显示和播放。旧用法 platform=163 + 网易云歌曲ID 也可。⚠发送可能较慢（>10秒），超时后请先用 QGetMessages 确认是否已发出，不要重复发送")]
+    [Description("发送音乐到QQ聊天（点歌）。platform=search musicId=歌名关键词（如 晴天 周杰伦）即可，默认发网易云官方卡片。若接收方显示\"发送者版本过低\"，说明 NapCat 未配置 musicSignUrl，可在插件配置把 音乐卡片样式 改为 record（直接发语音条，任何端可播）。旧用法 platform=163 + 网易云歌曲ID 也可。⚠发送可能较慢（>10秒），超时后请先用 QGetMessages 确认，不要重复发送")]
     public async Task SendMusicCard(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("消息类型：private或group")] string type,
@@ -1214,29 +1233,55 @@ public class QQEnhanceModule(
 
             // 2. 构造消息
             object message;
-            if (Configuration.MusicCardStyle == "custom")
+            switch (Configuration.MusicCardStyle)
             {
-                // 高级选项：custom 自定义音乐段（需 NapCat musicSignUrl 签名，否则接收方显示"发送者版本过低"）
-                string? playUrl = await ResolveNcmUrlAsync(ncmId);
-                if (string.IsNullOrEmpty(playUrl))
+                case "record":
                 {
-                    interactor.Poke("custom 样式需要可用的音乐直链，当前解析失败。建议改用默认的 163 官方卡片样式（配置项 音乐卡片样式=163）");
-                    return;
+                    // 保底：直接发语音条（网易云直链，NapCat 自行下载转码，完全不依赖签名，任何端可播）
+                    string? playUrl = await ResolveNcmUrlAsync(ncmId);
+                    if (string.IsNullOrEmpty(playUrl))
+                    {
+                        interactor.Poke("语音条模式需要可用的音乐直链，当前解析失败，请稍后再试或改用 163 卡片样式");
+                        return;
+                    }
+                    message = new object[] {
+                        new { type = "record", data = new { file = playUrl } }
+                    };
+                    break;
                 }
-                string cq = new StringBuilder("[CQ:music,type=custom,url=")
-                    .Append(CqEscape($"https://music.163.com/song?id={ncmId}"))
-                    .Append(",audio=").Append(CqEscape(playUrl))
-                    .Append(",title=").Append(CqEscape(musicId))
-                    .Append(']')
-                    .ToString();
-                message = cq;
-            }
-            else
-            {
-                // 默认：网易云官方卡片（结构化 music 消息段，NapCat 用官方 appid 生成，免签名全端可渲染）
-                message = new object[] {
-                    new { type = "music", data = new { type = "163", id = ncmId.ToString() } }
-                };
+                case "custom":
+                {
+                    // 高级选项：custom 自定义音乐段（需 NapCat musicSignUrl 签名，否则接收方显示"发送者版本过低"）
+                    string? playUrl = await ResolveNcmUrlAsync(ncmId);
+                    if (string.IsNullOrEmpty(playUrl))
+                    {
+                        interactor.Poke("custom 样式需要可用的音乐直链，当前解析失败。建议改用默认的 163 官方卡片样式，或 record 语音条样式");
+                        return;
+                    }
+                    message = new StringBuilder("[CQ:music,type=custom,url=")
+                        .Append(CqEscape($"https://music.163.com/song?id={ncmId}"))
+                        .Append(",audio=").Append(CqEscape(playUrl))
+                        .Append(",title=").Append(CqEscape(musicId))
+                        .Append(']')
+                        .ToString();
+                    break;
+                }
+                case "json":
+                {
+                    // QQ 分享卡片（com.tencent.structmsg），未配置签名时可能显示"发送者版本过低"
+                    message = BuildJsonMusicCq(musicId, ncmId);
+                    break;
+                }
+                default:
+                {
+                    // 默认：网易云官方卡片（结构化 music 消息段，NapCat 用官方 appid 生成）
+                    // 若接收方仍显示"发送者版本过低"，说明 NapCat 未配置 musicSignUrl 签名，
+                    // 请在 NapCat WebUI 配置 musicSignUrl，或改用 record 语音条样式
+                    message = new object[] {
+                        new { type = "music", data = new { type = "163", id = ncmId.ToString() } }
+                    };
+                    break;
+                }
             }
 
             // 3. 发送
@@ -1316,7 +1361,52 @@ public class QQEnhanceModule(
         return 0;
     }
 
-    /// <summary>网易云歌曲ID → 直链（仅供 custom 样式使用：meting type=url 优先，vkeys 兜底）</summary>
+    /// <summary>构造 QQ 分享卡片 CQ 码（com.tencent.structmsg，json 样式用）</summary>
+    private static string BuildJsonMusicCq(string title, long ncmId)
+    {
+        long ctime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        string jump = $"https://music.163.com/song?id={ncmId}";
+        var meta = new Dictionary<string, object>
+        {
+            ["music"] = new Dictionary<string, object>
+            {
+                ["app_type"] = 1,
+                ["appid"] = 100495085,
+                ["ctime"] = ctime,
+                ["desc"] = title,
+                ["jumpUrl"] = jump,
+                ["musicUrl"] = jump,
+                ["preview"] = "",
+                ["sourceMsgId"] = "0",
+                ["source_icon"] = "",
+                ["source_url"] = "",
+                ["tag"] = "网易云音乐",
+                ["title"] = title
+            }
+        };
+        var payload = new Dictionary<string, object>
+        {
+            ["app"] = "com.tencent.structmsg",
+            ["config"] = new Dictionary<string, object>
+            {
+                ["autosize"] = true,
+                ["ctime"] = ctime,
+                ["forward"] = true,
+                ["token"] = Guid.NewGuid().ToString("N"),
+                ["type"] = "normal"
+            },
+            ["desc"] = "音乐",
+            ["extra"] = new Dictionary<string, object> { ["app_type"] = 1, ["appid"] = 100495085, ["uin"] = 0 },
+            ["meta"] = meta,
+            ["prompt"] = $"[分享]{title}",
+            ["ver"] = "0.0.0.1",
+            ["view"] = "music"
+        };
+        string json = JsonSerializer.Serialize(payload);
+        return $"[CQ:json,data={CqEscape(json)}]";
+    }
+
+    /// <summary>网易云歌曲ID → 直链（仅供 record/custom 样式使用：meting type=url 优先，vkeys 兜底）</summary>
     private static async Task<string?> ResolveNcmUrlAsync(long id)
     {
         try
@@ -1540,6 +1630,19 @@ public class QQEnhanceModule(
             logger.LogWarning(e, "获取QQ用户名失败: {UserId}", userId);
             return "";
         }
+    }
+
+    // ==================== 互动提示（官方消息过滤同款 ChatSend 钩子） ====================
+
+    /// <summary>收到QQ消息时按概率在消息末尾附加互动提示（配置可开关/调概率/改文本）</summary>
+    private string OnChatSendHint(string message)
+    {
+        if (string.IsNullOrWhiteSpace(Configuration.InteractionHintText)) return message;
+        // 只附加在 QQ 来源的消息上（群聊/私聊标签），不影响其他模块的消息
+        if (!message.Contains("[群聊消息(") && !message.Contains("[私聊消息(")) return message;
+        int prob = Math.Clamp(Configuration.InteractionHintProbability, 0, 100);
+        if (prob < 100 && Random.Shared.Next(100) >= prob) return message;
+        return message + "\n" + Configuration.InteractionHintText;
     }
 
     // ==================== Typing Indicator ====================

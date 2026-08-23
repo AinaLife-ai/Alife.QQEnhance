@@ -66,3 +66,9 @@ QQ 消息 ID 为负数，撤回/贴表情/引用/转发必须使用真实 ID。�
 - **音乐卡片**：默认网易云官方卡片（music 消息段 type=163），免签名全端可渲染；配置"音乐卡片样式=custom"为高级选项，需 NapCat 配置 musicSignUrl，否则接收方显示"发送者版本过低"
 - 撤回合并转发卡片类消息会失败（NapCat 平台限制）
 - 实时消息捕获参考了 [YuYang.QQTools](https://github.com/3026838203/YuYang.QQTools) 的 WebSocket 监听思路，特此致谢
+
+## v4.9.1 修复说明
+
+- **合并转发/贴表情 RetCode 1400 修复**：NapCat 对 `set_msg_emoji_like` 的 `emoji_id`、转发节点的 `id`/`uin`、reply 段的 `id` 均要求 **string** 类型，此前传数字导致 1400 参数错误，已全部修正
+- **音乐卡片新增 record 语音条模式**（配置项 音乐卡片样式=record）：直接发网易云直链语音条，完全不依赖签名，任何端可播。卡片显示"发送者版本过低"说明 NapCat 未配置 `musicSignUrl`（WebUI → OneBot11 配置里填签名服务地址），不想配置就用 record 模式保底
+- **新增互动提示**（官方消息过滤同款 ChatSend 钩子）：收到 QQ 消息时在末尾附加提示，提醒 AI 可随手贴表情/引用/戳一戳/点赞。配置项可开关、调概率（默认 100%）、自定义文本
