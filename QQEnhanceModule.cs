@@ -60,9 +60,13 @@ public class QQEnhanceConfig
     public int InteractionHintProbability { get; set; } = 100;
 
     [DisplayName("互动提示文本")]
-    [Description("附加在消息末尾的提示内容，可自定义")]
+    [Description("附加在消息末尾的提示内容，可自定义。支持占位符：{scope}=群号或对方QQ、{type}=group或private、{uin}=发言人QQ、{nick}=发言人昵称、{poke}=戳一戳函数名（自动区分群聊/私聊）")]
     public string InteractionHintText { get; set; } =
-        "(可随手互动：SetEmojiRecent贴表情 / ReplyRecent引用回复 / PokeGroupMember或PokePrivateMember戳一戳 / SendQQLikes点赞——它们都是完整的回应，无需请示，也不用特意说明)";
+        "(可随手互动：ReplyRecent targetid={scope} messagetype={type} target={uin} 引用{nick}这条 / SetEmojiRecent target={uin} 贴表情 / {poke} target={uin} 戳一戳 / SendQQLikes target={uin} 点赞——都是完整回应，无需说明)";
+
+    [DisplayName("被引用/被@回引提示")]
+    [Description("当有人引用bot的消息或@bot时，在提示末尾追加一句回引建议（不含消息内容，省token），引导bot用引用回复回应")]
+    public bool QuoteBackHintEnabled { get; set; } = true;
 
     [DisplayName("戳一戳")]
     [Description("启用戳一戳功能（群聊/私聊）")]
@@ -784,7 +788,7 @@ public class QQEnhanceModule(
         }
         OneBotClient? client = GetClient();
         string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = messageId, emoji_id = emojiId.ToString(), set = true }, "贴表情", client);
-        interactor.Poke(err ?? "贴表情成功");
+        if (err != null) interactor.Poke(err);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -803,7 +807,7 @@ public class QQEnhanceModule(
 
         OneBotClient? client = GetClient();
         string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = msg.MessageId, emoji_id = emojiId.ToString(), set = true }, "贴表情", client);
-        interactor.Poke(err ?? $"已给 {target} 的消息贴表情（#{msg.MessageId}）");
+        if (err != null) interactor.Poke(err);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -834,7 +838,7 @@ public class QQEnhanceModule(
                 }
                 count += chunk;
             }
-            interactor.Poke($"点赞成功，点了 {count} 个赞");
+            // 成功静默
         }
         catch (Exception e)
         {
@@ -851,7 +855,7 @@ public class QQEnhanceModule(
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("撤回", "DeleteMessage")); return; }
         OneBotClient? client = GetClient();
         string? err = await CallActionSafeAsync("delete_msg", new { message_id = messageId }, "撤回", client);
-        interactor.Poke(err ?? "撤回成功（若失败且目标是合并转发卡片类消息，属于平台限制，无法撤回）");
+        if (err != null) interactor.Poke(err + "（若目标是合并转发卡片类消息，属于平台限制，无法撤回）");
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -874,7 +878,7 @@ public class QQEnhanceModule(
 
         OneBotClient? client = GetClient();
         string? err = await CallActionSafeAsync("delete_msg", new { message_id = msg.MessageId }, "撤回", client);
-        interactor.Poke(err ?? $"已撤回消息（#{msg.MessageId}）");
+        if (err != null) interactor.Poke(err);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -887,7 +891,7 @@ public class QQEnhanceModule(
         if (!Configuration.GroupBanEnabled) { interactor.Poke("禁言功能已禁用"); return; }
         OneBotClient? client = GetClient();
         string? err = await CallActionSafeAsync("set_group_ban", new { group_id = groupId, user_id = userId, duration }, "禁言", client);
-        interactor.Poke(err ?? "禁言成功");
+        if (err != null) interactor.Poke(err);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -900,7 +904,7 @@ public class QQEnhanceModule(
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("戳一戳", "PokeGroupMember")); return; }
         OneBotClient? client = GetClient();
         string? err = await CallActionSafeAsync("group_poke", new { group_id = groupId, user_id = userId }, "戳一戳", client);
-        interactor.Poke(err ?? $"成功戳了戳 {userId}");
+        if (err != null) interactor.Poke(err);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -911,7 +915,7 @@ public class QQEnhanceModule(
         if (!Configuration.PokeEnabled) { interactor.Poke("戳一戳功能已禁用"); return; }
         OneBotClient? client = GetClient();
         string? err = await CallActionSafeAsync("friend_poke", new { user_id = userId }, "私聊戳一戳", client);
-        interactor.Poke(err ?? $"成功私聊戳了戳 {userId}");
+        if (err != null) interactor.Poke(err);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -925,7 +929,7 @@ public class QQEnhanceModule(
         if (decide != "yes")
         {
             _lastPokeRequest = null;
-            interactor.Poke("已忽略这次戳一戳");
+            // 成功静默
             return;
         }
 
@@ -951,13 +955,13 @@ public class QQEnhanceModule(
             err = await CallActionSafeAsync("friend_poke", new { user_id = req.UserId }, "私聊戳一戳", client);
 
         _lastPokeRequest = null;
-        interactor.Poke(err ?? "成功回戳");
+        if (err != null) interactor.Poke(err);
     }
 
     // ==================== 引用回复 ====================
 
     /// <summary>引用回复核心：消息段数组 [{reply},{text}]（NapCat 原生支持，send_msg 无顶层 reply 参数）</summary>
-    private async Task<string> SendReplyCoreAsync(bool isGroup, long scopeId, long replyToId, string message)
+    private async Task<string?> SendReplyCoreAsync(bool isGroup, long scopeId, long replyToId, string message)  // 成功返回null（静默），仅失败/超时返回提示
     {
         OneBotClient? client = GetClient();
         if (client == null) return "引用回复失败：QQ客户端不可用";
@@ -974,7 +978,7 @@ public class QQEnhanceModule(
             long sentId = ExtractSentId(sent);
             if (sentId != 0)
                 RecordSentMessage(sentId, isGroup ? scopeId : 0, isGroup ? 0 : scopeId, message);
-            return $"引用回复发送成功（回复了消息 #{replyToId}）。消息已实际发出，不要再用 QChat 重复确认";
+            return null;  // 成功静默：不触发AI新一轮，避免多余的确认回复
         }
         catch (TaskCanceledException)
         {
@@ -1000,8 +1004,8 @@ public class QQEnhanceModule(
         (LiveMessage? msg, bool isGroup, long scopeId, string? error) = await ResolveTargetMessageAsync(target, targetId, messageType);
         if (msg == null) { interactor.Poke(error!); return; }
 
-        string result = await SendReplyCoreAsync(isGroup, scopeId, msg.MessageId, message);
-        interactor.Poke(result);
+        string? result = await SendReplyCoreAsync(isGroup, scopeId, msg.MessageId, message);
+        if (result != null) interactor.Poke(result);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -1031,8 +1035,8 @@ public class QQEnhanceModule(
             }
         }
 
-        string result = await SendReplyCoreAsync(isGroup, scopeId, replyToId, message);
-        interactor.Poke(result);
+        string? result = await SendReplyCoreAsync(isGroup, scopeId, replyToId, message);
+        if (result != null) interactor.Poke(result);
     }
 
     // ==================== 合并转发 ====================
@@ -1099,40 +1103,20 @@ public class QQEnhanceModule(
             return;
         }
 
-        // 注意：NapCat 的 node schema 强制要求 nickname/content 字段（缺失会直接 RetCode 1400），
-        // 所以即使走 id 引用也必须一并带上；id 有效时 NapCat 会忽略 nickname/content 使用原消息。
+        // 内容节点优先（方案A）：直接用缓存/历史里的消息文本构造自定义节点。
+        // 不经过 NapCat 的 MessageUnique id 查找，bot自己发的、历史补拉的一条都不会丢。
+        // 代价：图片/语音等富媒体以[图片]等占位文字呈现。
         var nodes = matches.Select(m => (object)new {
             type = "node",
             data = new {
-                id = m.MessageId.ToString(),
-                user_id = m.UserId.ToString(),
+                name = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname,
                 nickname = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname,
+                uin = m.UserId.ToString(),
                 content = m.Raw
             }
         }).ToList();
         var (ok, text) = await SendForwardCoreAsync(isGroup, targetId, nodes);
-        if (!ok && !text.StartsWith("合并转发请求超时"))
-        {
-            // 降级：ID 引用失效（NapCat 进程缓存丢失）时用自定义节点重建，保证发得出
-            var rebuilt = matches.Select(m => (object)new {
-                type = "node",
-                data = new {
-                    name = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname,
-                    nickname = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname,
-                    uin = m.UserId.ToString(),
-                    content = m.Raw
-                }
-            }).ToList();
-            var (ok2, text2) = await SendForwardCoreAsync(isGroup, targetId, rebuilt);
-            if (ok2)
-            {
-                interactor.Poke($"合并转发发送成功（{rebuilt.Count} 个节点，其中部分为重建文本节点而非原消息引用：{text}）");
-                return;
-            }
-            interactor.Poke($"{text}；降级重建也失败：{text2}");
-            return;
-        }
-        interactor.Poke(text);
+        if (!ok) interactor.Poke(text);  // 成功静默
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -1143,9 +1127,10 @@ public class QQEnhanceModule(
         [Description("消息类型：group或private，默认group")] string messageType = "group")
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
-        var nodes = new List<object> { new { type = "node", data = new { id = forwardId.ToString() } } };
-        var (_, text) = await SendForwardCoreAsync(messageType != "private", targetId, nodes);
-        interactor.Poke(text);
+        // NapCat node schema 强制要求 nickname/content 必填，缺失直接 RetCode 1400；id 有效时忽略这两个字段
+        var nodes = new List<object> { new { type = "node", data = new { id = forwardId.ToString(), nickname = "QQ用户", content = "" } } };
+        var (okFwd, text) = await SendForwardCoreAsync(messageType != "private", targetId, nodes);
+        if (!okFwd) interactor.Poke(text);  // 成功静默
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -1215,8 +1200,8 @@ public class QQEnhanceModule(
                 return;
             }
 
-            var (_, text) = await SendForwardCoreAsync(messageType != "private", targetId, nodes);
-            interactor.Poke(text);
+            var (okNew, text) = await SendForwardCoreAsync(messageType != "private", targetId, nodes);
+            if (!okNew) interactor.Poke(text);  // 成功静默
         }
         catch (Exception e)
         {
@@ -1379,7 +1364,7 @@ public class QQEnhanceModule(
             long sentId = ExtractSentId(sent);
             if (sentId != 0)
                 RecordSentMessage(sentId, isGroup ? targetId : 0, isGroup ? 0 : targetId, $"[音乐 网易云:{ncmId}]");
-            interactor.Poke($"音乐卡片发送成功（网易云 #{ncmId}）。消息已实际发出，不要再用 QChat 重复确认");
+            // 成功静默：不触发AI新一轮确认回复
         }
         catch (TaskCanceledException)
         {
@@ -1749,15 +1734,44 @@ public class QQEnhanceModule(
 
     // ==================== 互动提示（官方消息过滤同款 ChatSend 钩子） ====================
 
-    /// <summary>收到QQ消息时按概率在消息末尾附加互动提示（配置可开关/调概率/改文本）</summary>
+    /// <summary>收到QQ消息时按概率在消息末尾附加互动提示（动态填入发言人参数，AI照抄即可调用，无需查ID）</summary>
     private string OnChatSendHint(string message)
     {
         if (string.IsNullOrWhiteSpace(Configuration.InteractionHintText)) return message;
         // 只附加在 QQ 来源的消息上（群聊/私聊标签），不影响其他模块的消息
-        if (!message.Contains("[群聊消息(") && !message.Contains("[私聊消息(")) return message;
+        bool isGroupMsg = message.Contains("[群聊消息(");
+        if (!isGroupMsg && !message.Contains("[私聊消息(")) return message;
         int prob = Math.Clamp(Configuration.InteractionHintProbability, 0, 100);
         if (prob < 100 && Random.Shared.Next(100) >= prob) return message;
-        return message + "\n" + Configuration.InteractionHintText;
+
+        // 解析会话：[群聊消息(群号,群名)] / [私聊消息(QQ,昵称)]
+        Match scopeMatch = Regex.Match(message, isGroupMsg ? @"\[群聊消息\((?<id>\d+)" : @"\[私聊消息\((?<id>\d+)");
+        string scope = scopeMatch.Success ? scopeMatch.Groups["id"].Value : "";
+        // 解析最后一位发言人：[QQ(昵称)]:（批量消息取最后一条的发言人，AI 最可能要回应的就是TA）
+        Match? speakerMatch = Regex.Matches(message, @"\[(?<uin>\d+)\((?<nick>[^)]*)\)\]:")
+            .Cast<Match>().LastOrDefault();
+        string uin = speakerMatch?.Groups["uin"].Value ?? scope;
+        string nick = speakerMatch?.Groups["nick"].Value ?? "对方";
+
+        string hint = Configuration.InteractionHintText
+            .Replace("{scope}", scope)
+            .Replace("{type}", isGroupMsg ? "group" : "private")
+            .Replace("{uin}", uin)
+            .Replace("{nick}", nick)
+            .Replace("{poke}", isGroupMsg ? "PokeGroupMember" : "PokePrivateMember");
+
+        // 被引用/被@时追加回引建议（不含消息内容，省token）
+        if (Configuration.QuoteBackHintEnabled)
+        {
+            long botId = GetClient()?.BotId ?? 0;
+            if (botId != 0 && !string.IsNullOrEmpty(uin) && uin != botId.ToString() &&
+                (message.Contains($"的回复]@{botId}") || message.Contains($"@{botId}")))
+            {
+                string reason = message.Contains($"的回复]@{botId}") ? "引用了你的消息" : "@了你";
+                hint += $"（{nick}{reason}，回应时可用上面的 ReplyRecent 参数引用TA这条）";
+            }
+        }
+        return message + "\n" + hint;
     }
 
     // ==================== Typing Indicator ====================
