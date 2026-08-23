@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Alife.Framework;
 using Alife.Function.FunctionCaller;
+using Alife.Function.MessageFilter;
 using Alife.Function.QChat;
 using Microsoft.Extensions.Logging;
 
@@ -67,13 +68,17 @@ public class QQEnhanceConfig
     [Description("收到别人的戳一戳后注入决策提示，让模型顺带决定是否回戳（PokeBack），不影响正常回复构建")]
     public bool PokeDecideEnabled { get; set; } = true;
 
+    [DisplayName("提示冷却时间(秒)")]
+    [Description("戳回决策/被赞/被贴表情等事件提示的最小间隔，默认10秒")]
+    public double NoticeCooldownSeconds { get; set; } = 10;
+
     [DisplayName("被赞感知")]
-    [Description("感知资料卡被点赞并提示AI可回赞（依赖实时消息捕获开启）")]
-    public bool PerceiveProfileLike { get; set; } = true;
+    [Description("感知资料卡被点赞并提示AI可回赞（依赖实时消息捕获开启），默认关闭")]
+    public bool PerceiveProfileLike { get; set; } = false;
 
     [DisplayName("被贴表情感知")]
-    [Description("感知群消息被贴表情并提示AI（依赖实时消息捕获开启）")]
-    public bool PerceiveEmojiLike { get; set; } = true;
+    [Description("感知群消息被贴表情并提示AI（依赖实时消息捕获开启），默认关闭")]
+    public bool PerceiveEmojiLike { get; set; } = false;
 
     [DisplayName("引用回复")]
     [Description("启用引用回复消息功能")]
@@ -144,6 +149,7 @@ public class QQEnhanceModule(
     ILogger<QQEnhanceModule> logger,
     Interactor<QQEnhanceModule> interactor,
     QChatService qChatService,
+    MessageFilterService messageFilterService,
     ModuleSystem moduleSystem) :
     ChatBehaviour,
     IConfigurable<QQEnhanceConfig>
@@ -242,14 +248,13 @@ public class QQEnhanceModule(
         public long Seq { get; init; }
     }
 
-    private CancellationTokenSource? _liveCts;
     private long _liveBotId;
     private long _liveSeq;
     private readonly ConcurrentQueue<LiveMessage> _liveMessages = new();
     private readonly ConcurrentDictionary<long, LiveMessage> _liveById = new();
     private DateTime _lastLikePromptTime = DateTime.MinValue;
     private DateTime _lastEmojiLikePromptTime = DateTime.MinValue;
-    private static readonly TimeSpan NoticePromptCooldown = TimeSpan.FromSeconds(30);
+    private TimeSpan NoticeCooldown => TimeSpan.FromSeconds(Math.Max(1, Configuration.NoticeCooldownSeconds));
 
     private void AddLiveMessage(LiveMessage msg)
     {
@@ -383,7 +388,7 @@ public class QQEnhanceModule(
 
             if (noticeType == "profile_like" && Configuration.PerceiveProfileLike)
             {
-                if (DateTime.Now - _lastLikePromptTime < NoticePromptCooldown) return;
+                if (DateTime.Now - _lastLikePromptTime < NoticeCooldown) return;
                 _lastLikePromptTime = DateTime.Now;
                 long operatorId = ReadPropLong(root, "operator_id");
                 string nick = ReadPropString(root, "operator_nick");
@@ -393,7 +398,7 @@ public class QQEnhanceModule(
             }
             else if (noticeType == "group_msg_emoji_like" && Configuration.PerceiveEmojiLike)
             {
-                if (DateTime.Now - _lastEmojiLikePromptTime < NoticePromptCooldown) return;
+                if (DateTime.Now - _lastEmojiLikePromptTime < NoticeCooldown) return;
                 _lastEmojiLikePromptTime = DateTime.Now;
                 long uid = ReadPropLong(root, "user_id");
                 long gid = ReadPropLong(root, "group_id");
@@ -553,7 +558,6 @@ public class QQEnhanceModule(
     private sealed record PokeRequest(long UserId, long GroupId, bool IsGroup, DateTime Time);
     private PokeRequest? _lastPokeRequest;
     private DateTime _lastPokePromptTime = DateTime.MinValue;
-    private static readonly TimeSpan PokePromptCooldown = TimeSpan.FromSeconds(30);
 
     protected override Task OnAwake()
     {
@@ -573,7 +577,8 @@ public class QQEnhanceModule(
                 - QQ消息ID通常是负数，禁止编造。撤回(DeleteMsg)/贴表情(SetEmoji)/引用(SendReplyMessage)指定消息时，ID必须来自 QGetMessages 返回的 [消息ID:xxx]。
                 - 高频场景一步到位（推荐优先用）：ReplyRecent=引用某人最近一条；SetEmojiRecent=给某人最近一条贴表情；DeleteMsgRecent=撤回自己最近一条；ForwardRecent=转发最近N条。这些都无需查ID。
                 - 回复最近一条用 ReplyRecent；回复更早的指定消息用 QGetMessages 查列表，再用 SendReplyMessage replyToId=真实ID。
-                - 音乐卡片：SendMusicCard platform=search musicId=歌名 即可（默认网易云官方卡片）。发送可能较慢，超时后先用 QGetMessages 确认，不要重复发送。
+                - 音乐卡片：SendMusicCard platform=search musicId=歌名 即可。发送可能较慢，超时后先用 QGetMessages 确认，不要重复发送。
+                - 用本插件发送类函数（引用回复/合并转发/音乐卡片）成功后就已完成发送，不要再用 QChat 发重复确认消息。
                 - 戳一戳：PokeGroupMember 群聊戳；PokePrivateMember 私聊戳；被戳后系统会提示，用 PokeBack 回戳或忽略。
                 """;
 
@@ -615,6 +620,44 @@ public class QQEnhanceModule(
         return Task.CompletedTask;
     }
 
+    /// <summary>官方QChat纠错规则要求"QQ消息输入必须输出QChat标签"，与QQ增强发送类函数冲突（用ReplyRecent回复后会触发纠错→AI又发一条重复确认）。
+    /// 在所有模块Awake后把该规则替换为扩展版：输出含 QChat 或本插件任意函数名都算合规。模块销毁时恢复原规则。</summary>
+    private MessageReplyRule? _originalQChatRule;
+
+    protected override Task OnStart()
+    {
+        try
+        {
+            if (messageFilterService.MessageReplyRules is List<MessageReplyRule> rules)
+            {
+                _originalQChatRule = rules.FirstOrDefault(r => r.Name == "QChatService");
+                if (_originalQChatRule != null)
+                {
+                    MessageReplyRule orig = _originalQChatRule;
+                    string[] qqEnhanceFunctions = [
+                        "ReplyRecent", "SendReplyMessage", "ForwardRecent", "SendForwardById", "SendForwardNew",
+                        "SendMusicCard", "QGetMessages", "SetEmojiRecent", "SetEmoji", "DeleteMsgRecent", "DeleteMsg",
+                        "SendQQLikes", "PokeGroupMember", "PokePrivateMember", "PokeBack", "GroupBan"
+                    ];
+                    rules.Remove(orig);
+                    messageFilterService.AddMessageReplyRule(new MessageReplyRule {
+                        Name = orig.Name,
+                        InputMatching = orig.InputMatching,
+                        OutputMatching = output => orig.OutputMatching(output) ||
+                            qqEnhanceFunctions.Any(f => output.Contains(f, StringComparison.OrdinalIgnoreCase)),
+                        CorrectionMessage = orig.CorrectionMessage
+                    }, DestroyCancellationToken);
+                    logger.LogInformation("QQ增强：已扩展QChat回复格式规则，使用QQ增强函数回复不再触发格式纠正");
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            logger.LogWarning(e, "扩展QChat回复格式规则失败（不影响其他功能）");
+        }
+        return Task.CompletedTask;
+    }
+
     protected override Task OnDestroy()
     {
         OneBotClient? client = GetClient();
@@ -624,6 +667,16 @@ public class QQEnhanceModule(
         ChatBot.ChatSent -= OnChatSent;
         ChatBot.ChatOver -= OnChatOver;
         ChatBot.ChatSend -= OnChatSendHint;
+
+        // 恢复官方QChat纠错规则（OnStart 中替换过）
+        if (_originalQChatRule != null &&
+            messageFilterService.MessageReplyRules is List<MessageReplyRule> restoreRules &&
+            !restoreRules.Any(r => r.Name == "QChatService" && ReferenceEquals(r, _originalQChatRule)))
+        {
+            restoreRules.RemoveAll(r => r.Name == "QChatService");
+            restoreRules.Add(_originalQChatRule);
+            _originalQChatRule = null;
+        }
 
         lock (_typingLock)
         {
@@ -720,6 +773,11 @@ public class QQEnhanceModule(
     {
         if (!Configuration.EmojiReactEnabled) { interactor.Poke("贴表情功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("贴表情", "SendEmojiLike")); return; }
+        if (_liveById.TryGetValue(messageId, out LiveMessage? known) && known.IsSelf)
+        {
+            interactor.Poke("这条消息是你自己发的，不建议给自己的消息贴表情，已跳过。请从 QGetMessages 列表里选别人发的消息");
+            return;
+        }
         OneBotClient? client = GetClient();
         string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = messageId, emoji_id = emojiId.ToString(), set = true }, "贴表情", client);
         interactor.Poke(err ?? "贴表情成功");
@@ -912,7 +970,7 @@ public class QQEnhanceModule(
             long sentId = ExtractSentId(sent);
             if (sentId != 0)
                 RecordSentMessage(sentId, isGroup ? scopeId : 0, isGroup ? 0 : scopeId, message);
-            return $"引用回复发送成功（回复了消息 #{replyToId}）";
+            return $"引用回复发送成功（回复了消息 #{replyToId}）。消息已实际发出，不要再用 QChat 重复确认";
         }
         catch (TaskCanceledException)
         {
@@ -990,7 +1048,7 @@ public class QQEnhanceModule(
             if (sentId != 0)
                 RecordSentMessage(sentId, isGroup ? scopeId : 0, isGroup ? 0 : scopeId,
                     resId != 0 ? $"[CQ:forward,id={resId}]" : "[合并转发]");
-            return (true, $"合并转发发送成功（{nodes.Count} 个节点{(resId != 0 ? $"，res_id={resId}" : "")}）");
+            return (true, $"合并转发发送成功（{nodes.Count} 个节点{(resId != 0 ? $"，res_id={resId}" : "")}）。消息已实际发出，不要再用 QChat 重复确认");
         }
         catch (TaskCanceledException)
         {
@@ -1037,7 +1095,17 @@ public class QQEnhanceModule(
             return;
         }
 
-        var nodes = matches.Select(m => (object)new { type = "node", data = new { id = m.MessageId.ToString() } }).ToList();
+        // 注意：NapCat 的 node schema 强制要求 nickname/content 字段（缺失会直接 RetCode 1400），
+        // 所以即使走 id 引用也必须一并带上；id 有效时 NapCat 会忽略 nickname/content 使用原消息。
+        var nodes = matches.Select(m => (object)new {
+            type = "node",
+            data = new {
+                id = m.MessageId.ToString(),
+                user_id = m.UserId.ToString(),
+                nickname = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname,
+                content = m.Raw
+            }
+        }).ToList();
         var (ok, text) = await SendForwardCoreAsync(isGroup, targetId, nodes);
         if (!ok && !text.StartsWith("合并转发请求超时"))
         {
@@ -1046,6 +1114,7 @@ public class QQEnhanceModule(
                 type = "node",
                 data = new {
                     name = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname,
+                    nickname = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname,
                     uin = m.UserId.ToString(),
                     content = m.Raw
                 }
@@ -1130,7 +1199,7 @@ public class QQEnhanceModule(
                     long uin = node.TryGetProperty("uin", out var u) && u.ValueKind == JsonValueKind.Number ? u.GetInt64()
                         : (node.TryGetProperty("uin", out var u2) && u2.ValueKind == JsonValueKind.String && long.TryParse(u2.GetString(), out var u3) ? u3 : 0);
                     string content = node.TryGetProperty("content", out var c) ? c.GetString() ?? "" : "";
-                    nodes.Add(new { type = "node", data = new { name, uin = uin.ToString(), content } });
+                    nodes.Add(new { type = "node", data = new { name, nickname = name, uin = uin.ToString(), content } });
                 }
             }
             if (nodes.Count == 0)
@@ -1291,7 +1360,7 @@ public class QQEnhanceModule(
             long sentId = ExtractSentId(sent);
             if (sentId != 0)
                 RecordSentMessage(sentId, isGroup ? targetId : 0, isGroup ? 0 : targetId, $"[音乐 网易云:{ncmId}]");
-            interactor.Poke($"音乐卡片发送成功（网易云 #{ncmId}）");
+            interactor.Poke($"音乐卡片发送成功（网易云 #{ncmId}）。消息已实际发出，不要再用 QChat 重复确认");
         }
         catch (TaskCanceledException)
         {
@@ -1559,7 +1628,7 @@ public class QQEnhanceModule(
                 _lastPokeRequest = new PokeRequest(noticeEvent.UserId, noticeEvent.GroupId, isGroup, DateTime.Now);
 
                 // 冷却期内不重复注入，避免连续戳一戳刷屏上下文
-                if (DateTime.Now - _lastPokePromptTime < PokePromptCooldown) return;
+                if (DateTime.Now - _lastPokePromptTime < NoticeCooldown) return;
                 _lastPokePromptTime = DateTime.Now;
 
                 string userName = await GetQQUserName(noticeEvent.UserId, noticeEvent.GroupId);
