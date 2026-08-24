@@ -1338,19 +1338,25 @@ public class QQEnhanceModule(
                 }
                 case "custom":
                 {
-                    // 高级选项：custom 自定义音乐段（需 NapCat musicSignUrl 签名，否则接收方显示"发送者版本过低"）
+                    // custom 自定义音乐段。NapCat 要求 url+image 必填，否则直接丢弃；
+                    // 最终仍走签名服务（与163同一通道），账号被风控时同样会显示"版本过低"
                     string? playUrl = await ResolveNcmUrlAsync(ncmId);
                     if (string.IsNullOrEmpty(playUrl))
                     {
-                        interactor.Poke("custom 样式需要可用的音乐直链，当前解析失败。建议改用默认的 163 官方卡片样式，或 record 语音条样式");
+                        interactor.Poke("custom 样式需要可用的音乐直链，当前解析失败。建议改用默认的 163 卡片样式，或 record 语音条样式");
                         return;
                     }
-                    message = new StringBuilder("[CQ:music,type=custom,url=")
-                        .Append(CqEscape($"https://music.163.com/song?id={ncmId}"))
-                        .Append(",audio=").Append(CqEscape(playUrl))
-                        .Append(",title=").Append(CqEscape(musicId))
-                        .Append(']')
-                        .ToString();
+                    var (songTitle, songArtist, songCover) = await GetNcmSongDetailAsync(ncmId);
+                    message = new object[] {
+                        new { type = "music", data = new {
+                            type = "custom",
+                            url = $"https://music.163.com/song?id={ncmId}",
+                            audio = playUrl,
+                            title = songTitle,
+                            content = songArtist,
+                            image = songCover
+                        } }
+                    };
                     break;
                 }
                 case "json":
@@ -1431,6 +1437,34 @@ public class QQEnhanceModule(
             return body.Length > 10 ? body : null;
         }
         catch { return null; }
+    }
+
+    /// <summary>网易云歌曲详情（标题/歌手/封面），失败时回退到关键词与默认封面</summary>
+    private static async Task<(string title, string artist, string cover)> GetNcmSongDetailAsync(long ncmId)
+    {
+        try
+        {
+            string url = $"https://music.163.com/api/song/detail/?id={ncmId}&ids=%5B{ncmId}%5D";
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.TryAddWithoutValidation("Referer", "https://music.163.com/");
+            using var resp = await _http.SendAsync(req);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            JsonElement song = doc.RootElement.GetProperty("songs")[0];
+            string title = song.GetProperty("name").GetString() ?? ncmId.ToString();
+            string artist = song.TryGetProperty("artists", out JsonElement arts) && arts.GetArrayLength() > 0
+                ? string.Join("/", arts.EnumerateArray().Select(a => a.GetProperty("name").GetString()))
+                : "未知歌手";
+            string cover = song.TryGetProperty("album", out JsonElement album) &&
+                           album.TryGetProperty("picUrl", out JsonElement pic)
+                ? pic.GetString() ?? "" : "";
+            if (string.IsNullOrEmpty(cover))
+                cover = "https://p1.music.126.net/6y-UleORITEDbvrOLV0Q8A==/5639395138885805.jpg"; // 网易云默认封面
+            return (title, artist, cover);
+        }
+        catch
+        {
+            return (ncmId.ToString(), "未知歌手", "https://p1.music.126.net/6y-UleORITEDbvrOLV0Q8A==/5639395138885805.jpg");
+        }
     }
 
     private static async Task<long> SearchNetEaseIdAsync(string keyword)
