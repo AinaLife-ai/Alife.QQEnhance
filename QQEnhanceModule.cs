@@ -31,6 +31,10 @@ public class QQEnhanceConfig
     [Description("启用给QQ用户资料卡点赞功能（好友与陌生人均可，平台日上限50次/人）")]
     public bool SendLikesEnabled { get; set; } = true;
 
+    [DisplayName("点赞成功回执")]
+    [Description("资料卡点赞成功后是否通知AI确认（点赞不像发言会刷屏，确认回执不会造成多余互动，默认开启）")]
+    public bool LikeConfirmEnabled { get; set; } = true;
+
     [DisplayName("撤回")]
     [Description("启用撤回QQ消息功能")]
     public bool DeleteMsgEnabled { get; set; } = true;
@@ -173,6 +177,28 @@ public class QQEnhanceModule(
         FieldInfo? field = typeof(QChatService).GetField("oneBotClient",
             BindingFlags.NonPublic | BindingFlags.Instance);
         return field?.GetValue(qChatService) as OneBotClient;
+    }
+
+    private string? _botNickname;
+
+    /// <summary>bot 真实昵称（转发/显示用），获取失败后退回"我"</summary>
+    private string SelfName => _botNickname ?? "我";
+
+    /// <summary>启动时拉取一次 bot 昵称（get_login_info），失败静默</summary>
+    private async Task FetchBotNicknameAsync(OneBotClient client)
+    {
+        try
+        {
+            var info = await client.CallActionAsync<LoginInfoResult>("get_login_info");
+            if (!string.IsNullOrWhiteSpace(info?.Nickname)) _botNickname = info!.Nickname;
+        }
+        catch { /* 忽略，用"我"兜底 */ }
+    }
+
+    private sealed class LoginInfoResult
+    {
+        [JsonPropertyName("nickname")]
+        public string? Nickname { get; init; }
     }
 
     private long GetBotId()
@@ -493,7 +519,7 @@ public class QQEnhanceModule(
         long botId = GetBotId();
         AddLiveMessage(new LiveMessage {
             MessageId = messageId, UserId = botId, GroupId = groupId, PeerId = peerId,
-            Nickname = "我", Raw = raw, Time = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            Nickname = SelfName, Raw = raw, Time = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
             IsSelf = true, Seq = Interlocked.Increment(ref _liveSeq)
         });
     }
@@ -588,6 +614,7 @@ public class QQEnhanceModule(
                 - 音乐卡片：SendMusicCard platform=search musicId=歌名 即可。发送可能较慢，超时后先用 QGetMessages 确认，不要重复发送。
                 - 用本插件发送类函数（引用回复/合并转发/音乐卡片）成功后就已完成发送，不要再用 QChat 发重复确认消息。
                 - 戳一戳：PokeGroupMember 群聊戳；PokePrivateMember 私聊戳；被戳后系统会提示，用 PokeBack 回戳或忽略。
+                - 贴表情 emojiId 对照（QQ官方表情列表，按需取用，不要每次都贴同一个）：201=点赞 264=捂脸 182=笑哭 271=吃瓜 270=emm 179=doge 269=暗中观察 273=我酸了 272=呵呵哒 222=抱抱 227=拍手 246=加油抱抱 116=示爱 122=爱你 214=啵啵 219=蹭一蹭 111=可怜 106=委屈 173=泪奔 262=脑阔疼 268=问号脸 265=辣眼睛 266=哦哟 267=头秃 277=汪汪 278=汗 281=无眼笑 282=敬礼 284=面无表情 285=摸鱼 287=哦 289=睁眼 104=哈欠 109=左亲亲 118=抱拳 120=拳头 123=NO 124=OK 125=转圈 129=挥手 144=喝彩 147=棒棒糖 171=茶 174=无奈 175=卖萌 176=小纠结 180=惊喜 181=骚扰 183=我最美 203=托脸 212=托腮 232=佛系 240=喷脸 243=甩头
                 """;
 
         XmlHandler xmlHandler = new(this) {
@@ -621,6 +648,8 @@ public class QQEnhanceModule(
         if (Configuration.InteractionHintEnabled)
             ChatBot.ChatSent -= OnChatSent; // 无操作，仅防误用
         ChatBot.ChatSend += OnChatSendHint;
+
+        _ = FetchBotNicknameAsync(client);
 
         if (Configuration.LiveCaptureEnabled)
             _ = LiveCaptureMainAsync(client, DestroyCancellationToken);
@@ -838,7 +867,7 @@ public class QQEnhanceModule(
                 }
                 count += chunk;
             }
-            // 成功静默
+            if (Configuration.LikeConfirmEnabled) interactor.Poke($"点赞成功，点了 {count} 个赞");
         }
         catch (Exception e)
         {
@@ -855,7 +884,7 @@ public class QQEnhanceModule(
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("撤回", "DeleteMessage")); return; }
         OneBotClient? client = GetClient();
         string? err = await CallActionSafeAsync("delete_msg", new { message_id = messageId }, "撤回", client);
-        if (err != null) interactor.Poke(err + "（若目标是合并转发卡片类消息，属于平台限制，无法撤回）");
+        if (err != null) interactor.Poke(err + "（RetCode 1200 是 NapCat 内部异常的统称，常见原因：消息超过约2分钟撤回时限、非管理员撤回他人消息、目标是卡片/合并转发类消息、或 NapCat 内存中已丢失该消息记录——超时类消息无法撤回属平台限制）");
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -878,7 +907,7 @@ public class QQEnhanceModule(
 
         OneBotClient? client = GetClient();
         string? err = await CallActionSafeAsync("delete_msg", new { message_id = msg.MessageId }, "撤回", client);
-        if (err != null) interactor.Poke(err);
+        if (err != null) interactor.Poke(err + "（RetCode 1200 是 NapCat 内部异常的统称，常见原因：消息超过约2分钟撤回时限、非管理员撤回他人消息、目标是卡片/合并转发类消息、或 NapCat 内存中已丢失该消息记录——超时类消息无法撤回属平台限制）");
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -1109,8 +1138,8 @@ public class QQEnhanceModule(
         var nodes = matches.Select(m => (object)new {
             type = "node",
             data = new {
-                name = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname,
-                nickname = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? "我" : m.UserId.ToString()) : m.Nickname,
+                name = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? SelfName : m.UserId.ToString()) : m.Nickname,
+                nickname = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? SelfName : m.UserId.ToString()) : m.Nickname,
                 uin = m.UserId.ToString(),
                 content = m.Raw
             }
@@ -1593,7 +1622,7 @@ public class QQEnhanceModule(
             sb.AppendLine($"{target} 最近 {matches.Count} 条消息（[消息ID:xxx]即真实ID，可为负数，直接用于操作）：");
             foreach (var m in matches)
             {
-                string nick = m.IsSelf ? "我" : (string.IsNullOrEmpty(m.Nickname) ? m.UserId.ToString() : m.Nickname);
+                string nick = m.IsSelf ? SelfName : (string.IsNullOrEmpty(m.Nickname) ? m.UserId.ToString() : m.Nickname);
                 DateTime time = DateTimeOffset.FromUnixTimeSeconds(m.Time).LocalDateTime;
                 sb.AppendLine($"[{time:HH:mm:ss}] {m.UserId}({nick}) [消息ID:{m.MessageId}] {m.Raw}");
             }
