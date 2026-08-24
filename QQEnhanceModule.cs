@@ -291,6 +291,8 @@ public class QQEnhanceModule(
         public string FullRaw { get; init; } = "";
         /// <summary>含文件/嵌套转发/引用/卡片/音乐等无法CQ重建的结构化段——转发时必须用id节点（NapCat按真实ID取原消息，结构原样保留）</summary>
         public bool IdNodeOnly { get; init; }
+        /// <summary>已确认被撤回（内容保留在缓存中作存档，列表标注【已撤回】；撤回/贴表情/引用定位跳过，转发降级为内容节点）</summary>
+        public bool IsRecalled { get; set; }
         public long Time { get; init; }
         public bool IsSelf { get; init; }
         public long Seq { get; init; }
@@ -300,6 +302,36 @@ public class QQEnhanceModule(
     private long _liveSeq;
     private readonly ConcurrentQueue<LiveMessage> _liveMessages = new();
     private readonly ConcurrentDictionary<long, LiveMessage> _liveById = new();
+
+    // ==================== 撤回确认跟踪 ====================
+    // NapCat 对 delete_msg 可能返回成功（retcode 0）但 QQ 实际拒绝撤回
+    // （超2分钟时限、NapCat缓存丢失等），唯一可靠确认是事件流里的 group_recall/friend_recall 通知
+    /// <summary>已确认撤回的消息ID（mid -> 撤回unix秒），用于过滤缓存与列表</summary>
+    private readonly ConcurrentDictionary<long, long> _recalledIds = new();
+    /// <summary>等待撤回确认通知的回调（mid -> TCS）</summary>
+    private readonly ConcurrentDictionary<long, TaskCompletionSource<bool>> _recallWaiters = new();
+    /// <summary>捕获链路最近收到任意帧的时间（用于判断撤回确认通道是否可用）</summary>
+    private DateTime _lastCaptureTick = DateTime.MinValue;
+    private bool CaptureAlive => (DateTime.UtcNow - _lastCaptureTick).TotalSeconds < 60;
+
+    /// <summary>登记一条已撤回消息：移出ID索引、唤醒等待方、定时修剪</summary>
+    private void MarkRecalled(long mid)
+    {
+        if (mid == 0) return;
+        _recalledIds[mid] = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        _liveById.TryRemove(mid, out _);
+        if (_recallWaiters.TryRemove(mid, out TaskCompletionSource<bool>? tcs))
+            tcs.TrySetResult(true);
+        if (_recalledIds.Count > 2000)
+        {
+            long cutoff = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 3600;
+            foreach (KeyValuePair<long, long> kv in _recalledIds)
+                if (kv.Value < cutoff) _recalledIds.TryRemove(kv.Key, out _);
+        }
+    }
+
+    /// <summary>是否未被撤回（所有缓存查询的统一过滤条件）</summary>
+    private bool NotRecalled(LiveMessage m) => !_recalledIds.ContainsKey(m.MessageId);
     private DateTime _lastLikePromptTime = DateTime.MinValue;
     private DateTime _lastEmojiLikePromptTime = DateTime.MinValue;
     private TimeSpan NoticeCooldown => TimeSpan.FromSeconds(Math.Max(1, Configuration.NoticeCooldownSeconds));
@@ -307,6 +339,7 @@ public class QQEnhanceModule(
     private void AddLiveMessage(LiveMessage msg)
     {
         if (msg.MessageId == 0) return;
+        if (_recalledIds.ContainsKey(msg.MessageId)) return; // 已确认撤回的消息不再入缓存
         if (!_liveById.TryAdd(msg.MessageId, msg)) return;
         _liveMessages.Enqueue(msg);
         TrimLiveCache();
@@ -375,6 +408,7 @@ public class QQEnhanceModule(
 
             using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(ms.ToArray()));
             JsonElement root = doc.RootElement;
+            _lastCaptureTick = DateTime.UtcNow;
 
             if (!root.TryGetProperty("post_type", out var pt)) continue;
             string postType = pt.GetString() ?? "";
@@ -643,7 +677,8 @@ public class QQEnhanceModule(
                 AddLiveMessage(new LiveMessage {
                     MessageId = mid, UserId = uid, GroupId = gid, PeerId = peerId,
                     Nickname = nick, Raw = ExtractRawText(m), FullRaw = fullRaw, IdNodeOnly = idOnly, Time = time,
-                    IsSelf = isSelf, Seq = Interlocked.Increment(ref _liveSeq)
+                    IsSelf = isSelf, Seq = Interlocked.Increment(ref _liveSeq),
+                    IsRecalled = _recalledIds.ContainsKey(mid) // 回拉恢复存档时保留已撤回标记
                 });
                 added++;
             }
@@ -803,6 +838,7 @@ public class QQEnhanceModule(
 
         var candidates = _liveMessages
             .Where(m => isGroup ? m.GroupId == scopeId : (m.GroupId == 0 && m.PeerId == scopeId))
+            .Where(NotRecalled)
             .Where(m => self ? m.IsSelf
                 : byId ? m.UserId == targetUin
                 : m.Nickname.Contains(target, StringComparison.OrdinalIgnoreCase))
@@ -817,7 +853,7 @@ public class QQEnhanceModule(
     }
 
     /// <summary>全缓存范围定位目标用户最近一条消息（用于 targetId 缺省时推断会话）</summary>
-    private LiveMessage? FindFromUser(long scopeId, string target, bool isGroup, int index)
+    private LiveMessage? FindFromUser(long scopeId, string target, bool isGroup, int index, bool includeRecalled = false)
     {
         target = target.Trim();
         bool byId = long.TryParse(target, out long targetUin);
@@ -826,6 +862,7 @@ public class QQEnhanceModule(
 
         var candidates = _liveMessages
             .Where(m => isGroup ? m.GroupId == scopeId : (m.GroupId == 0 && m.PeerId == scopeId))
+            .Where(m => includeRecalled || NotRecalled(m))
             .Where(m => self ? m.IsSelf
                 : byId ? m.UserId == targetUin
                 : m.Nickname.Contains(target, StringComparison.OrdinalIgnoreCase))
@@ -846,6 +883,7 @@ public class QQEnhanceModule(
         bool self = target is "我" or "自己" || (byId && botId != 0 && targetUin == botId);
 
         return _liveMessages
+            .Where(NotRecalled)
             .Where(m => self ? m.IsSelf
                 : byId ? m.UserId == targetUin
                 : m.Nickname.Contains(target, StringComparison.OrdinalIgnoreCase))
@@ -854,9 +892,10 @@ public class QQEnhanceModule(
             .FirstOrDefault();
     }
 
-    /// <summary>定位结果解析：targetId 缺省时自动推断会话；找不到时回拉历史重试一次</summary>
+    /// <summary>定位结果解析：targetId 缺省时自动推断会话；找不到时回拉历史重试一次。
+    /// includeRecalled=true 时（仅撤回功能用）候选含已撤回消息，保证与撤回候选列表序号完全一致</summary>
     private async Task<(LiveMessage? msg, bool isGroup, long scopeId, string? error)> ResolveTargetMessageAsync(
-        string target, long targetId, string messageType, int index = 1)
+        string target, long targetId, string messageType, int index = 1, bool includeRecalled = false)
     {
         bool isGroup = messageType != "private";
         long scopeId = targetId;
@@ -995,18 +1034,26 @@ public class QQEnhanceModule(
         // 模式2：直接按真实ID撤
         if (messageId != 0)
         {
-            if (_liveById.TryGetValue(messageId, out LiveMessage? byId) && !byId.IsSelf && byId.GroupId == 0)
+            if (_liveById.TryGetValue(messageId, out LiveMessage? byId))
             {
-                interactor.Poke("私聊无法撤回对方的消息（平台限制），只能撤回自己发的");
-                return;
+                if (byId.IsRecalled)
+                {
+                    interactor.Poke($"[消息ID:{messageId}]已经是撤回状态（列表中标注【已撤回】），无需再撤，也不要再对它贴表情/引用");
+                    return;
+                }
+                if (!byId.IsSelf && byId.GroupId == 0)
+                {
+                    interactor.Poke("私聊无法撤回对方的消息（平台限制），只能撤回自己发的");
+                    return;
+                }
             }
             await RecallByIdAsync(messageId);
             return;
         }
 
-        // list 与默认模式都需要先定位 target 的消息
+        // list 与默认模式都需要先定位 target 的消息（includeRecalled: 候选与列表序号完全一致，含已撤回项）
         (LiveMessage? msg, bool isGroup, long scopeId, string? error) =
-            await ResolveTargetMessageAsync(target, targetId, messageType, list ? 1 : index);
+            await ResolveTargetMessageAsync(target, targetId, messageType, list ? 1 : index, includeRecalled: true);
 
         if (list)
         {
@@ -1037,11 +1084,11 @@ public class QQEnhanceModule(
             }
             if (candidates.Count == 0) { interactor.Poke($"未找到 {target} 的消息记录"); return; }
             var sb2 = new StringBuilder();
-            sb2.AppendLine($"{target} 的最近 {candidates.Count} 条消息（撤回用：DeleteMsgRecent index=序号 或 messageId=消息ID）：");
+            sb2.AppendLine($"{target} 的最近 {candidates.Count} 条消息（撤回用：DeleteMsgRecent index=序号 或 messageId=消息ID；标注【已撤回】的不能再撤）：");
             for (int i = 0; i < candidates.Count; i++)
             {
                 var c = candidates[i];
-                sb2.AppendLine($"{i + 1}. [消息ID:{c.MessageId}] {(c.IsSelf ? SelfName : c.Nickname)}: {FoldText(c.Raw)}");
+                sb2.AppendLine($"{i + 1}. [消息ID:{c.MessageId}]{(c.IsRecalled ? "【已撤回】" : "")} {(c.IsSelf ? SelfName : c.Nickname)}: {FoldText(c.Raw)}");
             }
             interactor.Poke(sb2.ToString());
             return;
@@ -1049,6 +1096,11 @@ public class QQEnhanceModule(
 
         // 模式1：撤倒数第 index 条
         if (msg == null) { interactor.Poke(error!); return; }
+        if (msg.IsRecalled)
+        {
+            interactor.Poke($"第 {index} 条 [消息ID:{msg.MessageId}]已经是撤回状态（列表中标注【已撤回】），无需再撤。要撤别的请用 list=true 看候选列表");
+            return;
+        }
         if (!msg.IsSelf && msg.GroupId == 0)
         {
             interactor.Poke("私聊无法撤回对方的消息（平台限制），只能撤回自己发的");
@@ -1057,18 +1109,49 @@ public class QQEnhanceModule(
         await RecallByIdAsync(msg.MessageId);
     }
 
-    /// <summary>按真实ID撤回并回执（含折叠内容摘要）</summary>
+    /// <summary>按真实ID撤回并回执（含折叠内容摘要）。NapCat 可能对实际失败的 delete_msg 也返回成功，
+    /// 因此在捕获链路可用时等待 group_recall/friend_recall 通知做真实确认，绝不谎报成功</summary>
     private async Task RecallByIdAsync(long mid)
     {
         OneBotClient? client = GetClient();
+
+        // 先登记确认等待（必须在发请求之前，避免通知先到而丢失）
+        bool canVerify = CaptureAlive;
+        Task<bool>? waitTask = null;
+        if (canVerify)
+        {
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _recallWaiters[mid] = tcs;
+            waitTask = tcs.Task;
+        }
+
         string? err = await CallActionSafeAsync("delete_msg", new { message_id = mid }, "撤回", client);
         if (err != null)
+        {
+            _recallWaiters.TryRemove(mid, out _);
             interactor.Poke(err + "（RetCode 1200 是 NapCat 内部异常的统称，常见原因：消息超过约2分钟撤回时限、非管理员撤回他人消息、目标是卡片/合并转发类消息、或 NapCat 内存中已丢失该消息记录——超时类消息无法撤回属平台限制）");
+            return;
+        }
+
+        string preview = _liveById.TryGetValue(mid, out LiveMessage? known)
+            ? $" {(known.IsSelf ? SelfName : known.Nickname)}: {FoldText(known.Raw)}" : "";
+
+        if (!canVerify || waitTask == null)
+        {
+            // 捕获链路不可用，无法二次确认——如实说明
+            interactor.Poke($"撤回请求已发送并被 NapCat 接受 [消息ID:{mid}]{preview}。实时捕获未连接，无法二次确认撤回结果；若消息仍在，多半是已超过约2分钟撤回时限（平台限制）");
+            return;
+        }
+
+        Task finished = await Task.WhenAny(waitTask, Task.Delay(TimeSpan.FromSeconds(5)));
+        _recallWaiters.TryRemove(mid, out _);
+        if (finished == waitTask)
+        {
+            interactor.Poke($"已撤回 [消息ID:{mid}]{preview}（已收到QQ撤回确认）。撤回已完成，无需再确认");
+        }
         else
         {
-            string preview = _liveById.TryGetValue(mid, out LiveMessage? known)
-                ? $" {(known.IsSelf ? SelfName : known.Nickname)}: {FoldText(known.Raw)}" : "";
-            interactor.Poke($"已撤回 [消息ID:{mid}]{preview}。撤回已完成，无需再确认");
+            interactor.Poke($"撤回请求已被 NapCat 接受，但5秒内未收到实际撤回通知——[消息ID:{mid}]{preview} 很可能并未真正撤回。最常见原因是消息已超过约2分钟撤回时限（平台限制，无法补救），或该ID在 NapCat 缓存中已失效。不要再重复撤回这条；可用 QGetMessages 核实消息是否还在");
         }
     }
 
@@ -1271,6 +1354,7 @@ public class QQEnhanceModule(
 
         List<LiveMessage> Query() => _liveMessages
             .Where(m => isGroup ? m.GroupId == targetId : (m.GroupId == 0 && m.PeerId == targetId))
+            .Where(NotRecalled)
             .OrderByDescending(m => m.Time)
             .ThenByDescending(m => m.Seq)
             .Take(count)
@@ -1298,17 +1382,17 @@ public class QQEnhanceModule(
             if (c0 != null) await FetchBotNicknameAsync(c0);
         }
 
-        // 内容节点优先（方案A）：直接用缓存/历史里的消息文本构造自定义节点。
-        // 不经过 NapCat 的 MessageUnique id 查找，bot自己发的、历史补拉的一条都不会丢。
-        // 代价：图片/语音等富媒体以[图片]等占位文字呈现。
-        var nodes = matches.Select(m => (object)new {
-            type = "node",
-            data = new {
-                name = m.IsSelf ? SelfName : (string.IsNullOrEmpty(m.Nickname) ? m.UserId.ToString() : m.Nickname),
-                nickname = m.IsSelf ? SelfName : (string.IsNullOrEmpty(m.Nickname) ? m.UserId.ToString() : m.Nickname),
-                uin = m.UserId.ToString(),
-                content = m.Raw
-            }
+        // 混合节点（全自动，无需LLM决策）：
+        // - 文本/图片/语音/视频/表情 → 内容节点：FullRaw 含完整 [CQ:image,file=原始URL] 等CQ码，
+        //   NapCat 解析后按原始URL重新下载并发出真实媒体，不依赖服务端消息缓存，bot自己发的、历史补拉的都不会丢；
+        // - 文件/嵌套转发/引用/卡片/音乐（IdNodeOnly）→ id节点：NapCat 按真实消息ID服务端取原消息，结构原样保留；
+        // - 已撤回消息服务端已取不到，强制降级为内容节点（媒体仍可CQ重发，结构化段退化为占位文字）。
+        var nodes = matches.Select(m =>
+        {
+            string nick = m.IsSelf ? SelfName : (string.IsNullOrEmpty(m.Nickname) ? m.UserId.ToString() : m.Nickname);
+            if (m.IdNodeOnly && !m.IsRecalled)
+                return (object)new { type = "node", data = new { id = m.MessageId.ToString(), nickname = nick, uin = m.UserId.ToString(), content = m.Raw } };
+            return (object)new { type = "node", data = new { name = nick, nickname = nick, uin = m.UserId.ToString(), content = string.IsNullOrEmpty(m.FullRaw) ? m.Raw : m.FullRaw } };
         }).ToList();
         var (ok, text) = await SendForwardCoreAsync(isGroup, targetId, nodes);
         if (!ok) interactor.Poke(text);  // 成功静默
@@ -1818,6 +1902,7 @@ public class QQEnhanceModule(
 
             List<LiveMessage> Query() => _liveMessages
                 .Where(m => groupId != 0 ? m.GroupId == groupId : (m.GroupId == 0 && m.PeerId == userId))
+                .Where(NotRecalled)
                 .OrderByDescending(m => m.Time)
                 .ThenByDescending(m => m.Seq)
                 .Take(count)
@@ -1842,12 +1927,12 @@ public class QQEnhanceModule(
 
             var sb = new StringBuilder();
             string target = groupId != 0 ? $"群 {groupId}" : $"与 {userId} 的私聊";
-            sb.AppendLine($"{target} 最近 {matches.Count} 条消息（[消息ID:xxx]即真实ID，可为负数，直接用于操作）：");
+            sb.AppendLine($"{target} 最近 {matches.Count} 条消息（[消息ID:xxx]即真实ID，可为负数，直接用于操作；标注【已撤回】的已不存在于QQ，仅作内容存档，不能再撤回/贴表情/引用）：");
             foreach (var m in matches)
             {
                 string nick = m.IsSelf ? SelfName : (string.IsNullOrEmpty(m.Nickname) ? m.UserId.ToString() : m.Nickname);
                 DateTime time = DateTimeOffset.FromUnixTimeSeconds(m.Time).LocalDateTime;
-                sb.AppendLine($"[{time:HH:mm:ss}] {m.UserId}({nick}) [消息ID:{m.MessageId}] {m.Raw}");
+                sb.AppendLine($"[{time:HH:mm:ss}] {m.UserId}({nick}) [消息ID:{m.MessageId}]{(m.IsRecalled ? "【已撤回】" : "")} {m.Raw}");
             }
             interactor.Poke(sb.ToString());
         }
