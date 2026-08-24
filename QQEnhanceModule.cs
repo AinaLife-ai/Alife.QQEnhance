@@ -924,13 +924,10 @@ public class QQEnhanceModule(
             scopeId = isGroup ? any.GroupId : any.PeerId;
         }
 
-        LiveMessage? live = FindFromUser(scopeId, target, isGroup, index);
-        if (live == null)
-        {
-            // 缓存不足：回拉历史补齐（history 返回的 message_id 已登记，可直接操作）
-            await BackfillHistoryAsync(isGroup ? scopeId : 0, isGroup ? 0 : scopeId, Math.Max(20, index + 10));
-            live = FindFromUser(scopeId, target, isGroup, index);
-        }
+        // 关键：定位前无条件刷新历史——bot经官方QChat发的消息只有在NapCat开启message_sent上报时才进捕获，
+        // 仅靠缓存会拿到陈旧条目（撤回目标其实是几小时前的消息→超2分钟必失败）。历史回拉的 message_id 真实可撤回
+        await BackfillHistoryAsync(isGroup ? scopeId : 0, isGroup ? 0 : scopeId, Math.Max(20, index + 10));
+        LiveMessage? live = FindFromUser(scopeId, target, isGroup, index, includeRecalled);
 
         if (live == null)
         {
@@ -1362,12 +1359,9 @@ public class QQEnhanceModule(
             .ThenBy(m => m.Seq)
             .ToList();
 
+        // 转发前无条件刷新历史，保证转发的是此刻最新消息（缓存可能因 message_sent 未上报而缺条目）
+        await BackfillHistoryAsync(isGroup ? targetId : 0, isGroup ? 0 : targetId, count);
         var matches = Query();
-        if (matches.Count < count)
-        {
-            await BackfillHistoryAsync(isGroup ? targetId : 0, isGroup ? 0 : targetId, count);
-            matches = Query();
-        }
 
         if (matches.Count == 0)
         {
@@ -1910,12 +1904,9 @@ public class QQEnhanceModule(
                 .ThenBy(m => m.Seq)
                 .ToList();
 
+            // 查询前无条件刷新历史，保证拿到的是此刻最新（缓存可能因 message_sent 未上报而缺自己刚发的消息）
+            await BackfillHistoryAsync(groupId, userId, count);
             var matches = Query();
-            if (matches.Count < count)
-            {
-                await BackfillHistoryAsync(groupId, userId, count);
-                matches = Query();
-            }
 
             if (matches.Count == 0)
             {
