@@ -6,16 +6,16 @@ QQ增强插件：贴表情、点赞、撤回、禁言、戳一戳、引用回复
 
 ## 功能
 
-- **贴表情**：`SetEmojiRecent`（对某人最近一条消息贴表情，免ID一步到位）+ `SetEmoji`（指定消息ID）
-- **资料卡点赞**：`SendQQLikes`，好友/陌生人均可，默认 50 次（顶满平台日上限），5×10 分块调用
-- **撤回**：`DeleteMsgRecent`（撤回自己刚发的消息，免ID）+ `DeleteMsg`（指定消息ID）
+- **贴表情**：`SetEmojiRecent`——双模式：默认对某人最近一条贴（免ID一步到位，index 可选倒数第N条）；也可直接传真实 messageId
+- **资料卡点赞**：`SendQQLikes`，好友/陌生人均可，默认 50 次（顶满平台日上限），5×10 分块调用；成功回执可用配置开关（默认开）
+- **撤回**：`DeleteMsgRecent`——三模式：默认撤 target 倒数第 index 条；传真实 messageId 直接撤；`list=true` 先出候选列表（序号+消息ID+折叠内容）再选撤。旧 `DeleteMsg` 已并入删除
 - **禁言**：`GroupBan` 禁言/解除群成员
-- **戳一戳**：`PokeGroupMember` 群聊 / `PokePrivateMember` 私聊 / `PokeBack` 被戳后回戳（30秒冷却防刷屏）
-- **引用回复**：`ReplyRecent`（回复某人最近一条，免ID，targetId 可省略自动推断会话）+ `SendReplyMessage`（回复任意指定消息ID，配合 QGetMessages 可引用 10 条之前的消息）
-- **合并转发**：`ForwardRecent`（转发最近N条，免ID，缓存不足自动回拉历史补齐，失效节点自动降级重建，支持私聊）+ `SendForwardById` + `SendForwardNew`（均支持群聊/私聊）
+- **戳一戳**：`PokeGroupMember` 群聊 / `PokePrivateMember` 私聊 / `PokeBack` 被戳后回戳（冷却可配置，默认10秒防刷屏）
+- **引用回复**：`ReplyRecent`——双模式：默认引用某人最近一条（targetId 可省略自动推断会话）；也可直接传真实 replyToId 引用指定消息。旧 `SendReplyMessage` 已并入删除
+- **合并转发**：`ForwardRecent`（转发最近N条，免ID，缓存不足自动回拉历史补齐。混合节点：文本/图片/语音/视频/表情走完整CQ码内容节点原样重发；文件/嵌套转发/引用/卡片/音乐走真实消息ID节点结构完整保留；含 bot 自己发的消息且显示真实QQ昵称）+ `SendForwardById` + `SendForwardNew`（均支持群聊/私聊）
 - **点歌/音乐卡片**：`SendMusicCard platform=search musicId=歌名`，默认发**网易云官方卡片**（结构化 music 消息段，免签名，任何 QQ 版本可正常显示播放，不会"版本过低"）
 - **感知通知**：被禁言/解禁、新成员进群、被戳（决策提示）、被赞资料卡（可回赞）、群消息被贴表情
-- **消息ID查询**：`QGetMessages`，实时捕获 + 历史回拉双来源，含 bot 自己发的消息
+- **消息ID查询**：`QGetMessages`（纯查询工具，含防抖：同会话15秒内超2次拒绝），实时捕获 + 历史回拉双来源，含 bot 自己发的消息
 - **私聊输入中状态**
 
 ## 主动社交设计
@@ -66,6 +66,19 @@ QQ 消息 ID 为负数，撤回/贴表情/引用/转发必须使用真实 ID。�
 - **音乐卡片**：默认网易云官方卡片（music 消息段 type=163），免签名全端可渲染；配置"音乐卡片样式=custom"为高级选项，需 NapCat 配置 musicSignUrl，否则接收方显示"发送者版本过低"
 - 撤回合并转发卡片类消息会失败（NapCat 平台限制）
 - 实时消息捕获参考了 [YuYang.QQTools](https://github.com/3026838203/YuYang.QQTools) 的 WebSocket 监听思路，特此致谢
+
+## v4.9.8 更新说明
+
+- **函数合并（6→3）**：`DeleteMsg`/`SetEmoji`/`SendReplyMessage` 删除，能力全部并入 `DeleteMsgRecent`/`SetEmojiRecent`/`ReplyRecent` 三个双模式函数——默认 target+index 免ID一步到位，也可直接传真实 messageId/replyToId
+- **撤回新增 list 模式**：`DeleteMsgRecent list=true` 列出目标最近10条候选（序号+真实消息ID+折叠内容，超15字符首5...尾5），AI 看完用序号或ID精确撤
+- **QGetMessages 防抖**：同一会话15秒内查询超过2次拒绝，防AI递归查询
+- **撤回一步到位**：targetId 缺省时自动推断最近会话，缓存miss自动回拉历史（bot自己经QChat发的消息也能撤）
+- **合并转发显示真实昵称**：内容节点模式，bot自己的消息用 get_login_info 拉取的真实QQ昵称（含60秒节流重试），不再显示"我"
+- **点赞成功回执**：新增配置开关（默认开）
+- **感知开关独立**：被赞/被贴表情感知各自独立开关，默认关；提示冷却可配置（默认10秒）
+- **表情ID对照表**：写入 Implicit 文档，零常驻token，AI取用时才注入
+- **私聊输入中状态修复**：恢复被错误摘除的 ChatSent 订阅
+- **成功静默**：发送类动作成功不再触发AI额外确认轮
 
 ## v4.9.1 修复说明
 

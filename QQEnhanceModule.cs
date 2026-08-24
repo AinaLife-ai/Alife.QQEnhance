@@ -181,6 +181,10 @@ public class QQEnhanceModule(
 
     private string? _botNickname;
 
+    /// <summary>QGetMessages 防抖：每个会话的查询时间戳</summary>
+    private readonly ConcurrentDictionary<string, List<DateTime>> _qgetTimes = new();
+    private readonly object _qgetLock = new();
+
     /// <summary>bot 真实昵称（转发/显示用），获取失败后退回"我"</summary>
     private string SelfName => _botNickname ?? "我";
 
@@ -283,6 +287,10 @@ public class QQEnhanceModule(
         public long PeerId { get; init; }
         public string Nickname { get; init; } = "";
         public string Raw { get; init; } = "";
+        /// <summary>完整原文（含 [CQ:image,file=url] 等完整CQ码），专供合并转发节点用——NapCat 会解析CQ码重发真实图片/语音/表情。AI展示用 Raw（占位符省token）</summary>
+        public string FullRaw { get; init; } = "";
+        /// <summary>含文件/嵌套转发/引用/卡片/音乐等无法CQ重建的结构化段——转发时必须用id节点（NapCat按真实ID取原消息，结构原样保留）</summary>
+        public bool IdNodeOnly { get; init; }
         public long Time { get; init; }
         public bool IsSelf { get; init; }
         public long Seq { get; init; }
@@ -410,10 +418,11 @@ public class QQEnhanceModule(
             }
 
             string raw = ExtractRawText(root);
+            var (fullRaw, idOnly) = ExtractFullText(root);
 
             AddLiveMessage(new LiveMessage {
                 MessageId = msgId, UserId = userId, GroupId = groupId, PeerId = peerId,
-                Nickname = nickname, Raw = raw, Time = time, IsSelf = isSelf,
+                Nickname = nickname, Raw = raw, FullRaw = fullRaw, IdNodeOnly = idOnly, Time = time, IsSelf = isSelf,
                 Seq = Interlocked.Increment(ref _liveSeq)
             });
         }
@@ -444,7 +453,7 @@ public class QQEnhanceModule(
                 long gid = ReadPropLong(root, "group_id");
                 long mid = ReadPropLong(root, "message_id");
                 string who = $"用户{uid}";
-                interactor.Poke($"[System {who} 在群 {gid} 给消息[消息ID:{mid}]贴了表情。可以贴回去（SetEmoji messageId={mid}）或接话回应，也可以忽略]");
+                interactor.Poke($"[System {who} 在群 {gid} 给消息[消息ID:{mid}]贴了表情。可以贴回去（SetEmojiRecent messageId={mid}）或接话回应，也可以忽略]");
             }
         }
         catch (Exception e)
@@ -506,6 +515,58 @@ public class QQEnhanceModule(
         return string.Join("", parts);
     }
 
+    /// <summary>无法用CQ码文本重建、转发必须走id节点的消息段类型</summary>
+    private static readonly HashSet<string> _idNodeSegmentTypes = new() { "file", "forward", "reply", "json", "music" };
+
+    /// <summary>提取完整原文：raw_message 本身含完整CQ码直接用；否则遍历消息段数组重建完整CQ码（图片/语音/视频带URL，表情带id），供合并转发节点原样重发富媒体。
+    /// idNodeOnly=true 表示含文件/嵌套转发/引用/卡片/音乐段，转发时必须用id节点</summary>
+    private static (string text, bool idNodeOnly) ExtractFullText(JsonElement root)
+    {
+        bool idOnly = false;
+        if (root.TryGetProperty("message", out var me) && me.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement seg in me.EnumerateArray())
+            {
+                if (seg.ValueKind == JsonValueKind.Object && _idNodeSegmentTypes.Contains(ReadPropString(seg, "type")))
+                { idOnly = true; break; }
+            }
+        }
+        string raw = ReadPropString(root, "raw_message");
+        if (!string.IsNullOrEmpty(raw)) return (raw, idOnly);
+        if (me.ValueKind == JsonValueKind.Undefined) return ("", idOnly);
+        if (me.ValueKind == JsonValueKind.String) return (me.GetString() ?? "", idOnly);
+        return (SegmentArrayToFullText(me), idOnly);
+    }
+
+    /// <summary>消息段数组 → 完整CQ码文本（富媒体保留 url/id，NapCat 解析后可原样重发）</summary>
+    private static string SegmentArrayToFullText(JsonElement segments)
+    {
+        var parts = new List<string>();
+        foreach (JsonElement seg in segments.EnumerateArray())
+        {
+            if (seg.ValueKind != JsonValueKind.Object) continue;
+            string type = ReadPropString(seg, "type");
+            if (!seg.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object) continue;
+            // 取媒体地址：url 优先，其次 file（可能是URL或本地路径）
+            string MediaUrl() => ReadPropString(data, "url") is { Length: > 0 } u ? u : ReadPropString(data, "file");
+            switch (type)
+            {
+                case "text": parts.Add(ReadPropString(data, "text")); break;
+                case "at": parts.Add($"[CQ:at,qq={ReadPropString(data, "qq")}]"); break;
+                case "face": parts.Add($"[CQ:face,id={ReadPropString(data, "id")}]"); break;
+                case "image": parts.Add($"[CQ:image,file={MediaUrl()}]"); break;
+                case "record": parts.Add($"[CQ:record,file={MediaUrl()}]"); break;
+                case "video": parts.Add($"[CQ:video,file={MediaUrl()}]"); break;
+                case "reply": break; // 转发节点里嵌套引用无意义，跳过
+                case "forward": parts.Add("[合并转发]"); break;
+                case "json": parts.Add("[卡片]"); break;
+                case "file": parts.Add("[文件]"); break;
+                case "music": parts.Add("[音乐]"); break;
+            }
+        }
+        return string.Join("", parts);
+    }
+
     // ==================== 发送自存（bot 自己发的消息也进缓存） ====================
 
     /// <summary>发送类 API 的返回（取 message_id / res_id）</summary>
@@ -525,7 +586,7 @@ public class QQEnhanceModule(
         long botId = GetBotId();
         AddLiveMessage(new LiveMessage {
             MessageId = messageId, UserId = botId, GroupId = groupId, PeerId = peerId,
-            Nickname = SelfName, Raw = raw, Time = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            Nickname = SelfName, Raw = raw, FullRaw = raw, Time = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
             IsSelf = true, Seq = Interlocked.Increment(ref _liveSeq)
         });
     }
@@ -578,9 +639,10 @@ public class QQEnhanceModule(
                     if (string.IsNullOrEmpty(nick)) nick = ReadPropString(se, "nickname");
                 }
                 long peerId = gid == 0 ? (groupId == 0 ? userId : 0) : 0;
+                var (fullRaw, idOnly) = ExtractFullText(m);
                 AddLiveMessage(new LiveMessage {
                     MessageId = mid, UserId = uid, GroupId = gid, PeerId = peerId,
-                    Nickname = nick, Raw = ExtractRawText(m), Time = time,
+                    Nickname = nick, Raw = ExtractRawText(m), FullRaw = fullRaw, IdNodeOnly = idOnly, Time = time,
                     IsSelf = isSelf, Seq = Interlocked.Increment(ref _liveSeq)
                 });
                 added++;
@@ -614,9 +676,9 @@ public class QQEnhanceModule(
                 """
             : """
                 使用规则：
-                - QQ消息ID通常是负数，禁止编造。撤回(DeleteMsg)/贴表情(SetEmoji)/引用(SendReplyMessage)指定消息时，ID必须来自 QGetMessages 返回的 [消息ID:xxx]。
-                - 高频场景一步到位（推荐优先用）：ReplyRecent=引用某人最近一条；SetEmojiRecent=给某人最近一条贴表情；DeleteMsgRecent=撤回自己最近一条；ForwardRecent=转发最近N条。这些都无需查ID。
-                - 回复最近一条用 ReplyRecent；回复更早的指定消息用 QGetMessages 查列表，再用 SendReplyMessage replyToId=真实ID。
+                - QQ消息ID通常是负数，禁止编造。三个消息操作函数均为双模式：撤回 DeleteMsgRecent、贴表情 SetEmojiRecent、引用 ReplyRecent——默认按 target（QQ号/昵称）+index（倒数第N条）一步到位，无需先查ID；已知真实ID时也可直接传 messageId/replyToId 操作指定消息（ID必须来自 QGetMessages 或 DeleteMsgRecent list=true 列表）。
+                - DeleteMsgRecent list=true 可列出目标最近10条候选（序号+消息ID+折叠内容），看完用 index 或 messageId 撤。
+                - 转发最近N条用 ForwardRecent（自动含bot自己的消息，真实昵称）。
                 - 音乐卡片：SendMusicCard platform=search musicId=歌名 即可。发送可能较慢，超时后先用 QGetMessages 确认，不要重复发送。
                 - 用本插件发送类函数（引用回复/合并转发/音乐卡片）成功后就已完成发送，不要再用 QChat 发重复确认消息。
                 - 戳一戳：PokeGroupMember 群聊戳；PokePrivateMember 私聊戳；被戳后系统会提示，用 PokeBack 回戳或忽略。
@@ -651,8 +713,6 @@ public class QQEnhanceModule(
         }
 
         // 互动提示：挂到官方消息过滤同款钩子（ChatBot.ChatSend），收到QQ消息时按概率附加提示
-        if (Configuration.InteractionHintEnabled)
-            ChatBot.ChatSent -= OnChatSent; // 无操作，仅防误用
         ChatBot.ChatSend += OnChatSendHint;
 
         _ = FetchBotNicknameAsync(client);
@@ -678,8 +738,8 @@ public class QQEnhanceModule(
                 {
                     MessageReplyRule orig = _originalQChatRule;
                     string[] qqEnhanceFunctions = [
-                        "ReplyRecent", "SendReplyMessage", "ForwardRecent", "SendForwardById", "SendForwardNew",
-                        "SendMusicCard", "QGetMessages", "SetEmojiRecent", "SetEmoji", "DeleteMsgRecent", "DeleteMsg",
+                        "ReplyRecent", "ForwardRecent", "SendForwardById", "SendForwardNew",
+                        "SendMusicCard", "QGetMessages", "SetEmojiRecent", "DeleteMsgRecent",
                         "SendQQLikes", "PokeGroupMember", "PokePrivateMember", "PokeBack", "GroupBan"
                     ];
                     rules.Remove(orig);
@@ -757,6 +817,27 @@ public class QQEnhanceModule(
     }
 
     /// <summary>全缓存范围定位目标用户最近一条消息（用于 targetId 缺省时推断会话）</summary>
+    private LiveMessage? FindFromUser(long scopeId, string target, bool isGroup, int index)
+    {
+        target = target.Trim();
+        bool byId = long.TryParse(target, out long targetUin);
+        long botId = GetBotId();
+        bool self = target is "我" or "自己" || (byId && botId != 0 && targetUin == botId);
+
+        var candidates = _liveMessages
+            .Where(m => isGroup ? m.GroupId == scopeId : (m.GroupId == 0 && m.PeerId == scopeId))
+            .Where(m => self ? m.IsSelf
+                : byId ? m.UserId == targetUin
+                : m.Nickname.Contains(target, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(m => m.Time)
+            .ThenByDescending(m => m.Seq)
+            .ToList();
+
+        if (!byId && !self && candidates.Select(m => m.UserId).Distinct().Count() > 1)
+            return null;
+        return candidates.Skip(Math.Max(0, index - 1)).FirstOrDefault();
+    }
+
     private LiveMessage? FindLatestFromUserAnywhere(string target)
     {
         target = target.Trim();
@@ -775,7 +856,7 @@ public class QQEnhanceModule(
 
     /// <summary>定位结果解析：targetId 缺省时自动推断会话；找不到时回拉历史重试一次</summary>
     private async Task<(LiveMessage? msg, bool isGroup, long scopeId, string? error)> ResolveTargetMessageAsync(
-        string target, long targetId, string messageType)
+        string target, long targetId, string messageType, int index = 1)
     {
         bool isGroup = messageType != "private";
         long scopeId = targetId;
@@ -783,6 +864,7 @@ public class QQEnhanceModule(
         if (scopeId == 0)
         {
             LiveMessage? any = FindLatestFromUserAnywhere(target);
+            // 注意：此处用最近一条定位"会话"，定位后按 index 在该会话内取倒数第N条
             if (any == null)
             {
                 // 缓存没有该用户消息（典型：bot自己通过QChat发的消息不在捕获中）——
@@ -803,12 +885,12 @@ public class QQEnhanceModule(
             scopeId = isGroup ? any.GroupId : any.PeerId;
         }
 
-        LiveMessage? live = FindLatestFromUser(scopeId, target, isGroup);
+        LiveMessage? live = FindFromUser(scopeId, target, isGroup, index);
         if (live == null)
         {
-            // 缓存不足：回拉历史补齐（history 返回的 message_id 是真实可用ID）
-            await BackfillHistoryAsync(isGroup ? scopeId : 0, isGroup ? 0 : scopeId, 20);
-            live = FindLatestFromUser(scopeId, target, isGroup);
+            // 缓存不足：回拉历史补齐（history 返回的 message_id 已登记，可直接操作）
+            await BackfillHistoryAsync(isGroup ? scopeId : 0, isGroup ? 0 : scopeId, Math.Max(20, index + 10));
+            live = FindFromUser(scopeId, target, isGroup, index);
         }
 
         if (live == null)
@@ -823,39 +905,40 @@ public class QQEnhanceModule(
     // ==================== 工具函数 ====================
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("给指定消息ID的QQ消息贴表情。messageId必须来自 QGetMessages 返回的[消息ID:xxx]，严禁编造。想给某人最近一条消息贴表情请直接用 SetEmojiRecent（免ID）")]
-    public async Task SetEmoji(
-        [Description("消息ID（必须来自QGetMessages）")] long messageId,
-        [Description("表情ID，201为点赞")] int emojiId)
-    {
-        if (!Configuration.EmojiReactEnabled) { interactor.Poke("贴表情功能已禁用"); return; }
-        if (ShouldDelegate()) { interactor.Poke(DelegateHint("贴表情", "SendEmojiLike")); return; }
-        if (_liveById.TryGetValue(messageId, out LiveMessage? known) && known.IsSelf)
-        {
-            interactor.Poke("这条消息是你自己发的，不建议给自己的消息贴表情，已跳过。请从 QGetMessages 列表里选别人发的消息");
-            return;
-        }
-        OneBotClient? client = GetClient();
-        string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = messageId, emoji_id = emojiId.ToString(), set = true }, "贴表情", client);
-        if (err != null) interactor.Poke(err);
-    }
-
-    [XmlFunction(FunctionMode.OneShot)]
-    [Description("对某人最近一条消息贴表情回应（免ID，一步到位）。看到有趣/赞同/暖心/好笑的消息时随手贴一个（201=点赞 4=滑稽 66=比心），这是真人最轻量的互动方式，不需要说话就可以直接贴")]
+    [Description("给QQ消息贴表情回应（一步到位，无需先查ID）。看到有趣/赞同/暖心/好笑的消息随手贴一个（201=点赞 264=捂脸 182=笑哭，更多表情ID见文档），这是真人最轻量的互动方式，不需要说话就可以直接贴。两种用法：1) 默认贴 target 的最近一条（index 可指定倒数第N条）；2) 已知真实消息ID时直接传 messageId（必须来自 QGetMessages 或撤回列表，严禁编造）")]
     public async Task SetEmojiRecent(
-        [Description("目标用户QQ号或昵称，\"我\"表示自己")] string target,
+        [Description("目标用户QQ号或昵称，\"我\"表示自己（messageId 模式下可省略）")] string target = "",
         [Description("表情ID，201为点赞")] int emojiId = 201,
+        [Description("贴倒数第几条，默认1=最近一条")] int index = 1,
+        [Description("真实消息ID（可选，传入则直接对该消息贴，忽略 target/index）")] long messageId = 0,
         [Description("目标群号（可省略，省略时自动推断最近会话）")] long targetId = 0,
         [Description("消息类型：group或private，可省略")] string messageType = "")
     {
         if (!Configuration.EmojiReactEnabled) { interactor.Poke("贴表情功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("贴表情", "SendEmojiLike")); return; }
+        index = Math.Clamp(index, 1, 20);
 
-        (LiveMessage? msg, _, _, string? error) = await ResolveTargetMessageAsync(target, targetId, messageType);
-        if (msg == null) { interactor.Poke(error!); return; }
+        long mid;
+        if (messageId != 0)
+        {
+            mid = messageId;
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(target)) { interactor.Poke("请传 target（QQ号或昵称）或 messageId（真实消息ID）"); return; }
+            (LiveMessage? msg, _, _, string? error) = await ResolveTargetMessageAsync(target, targetId, messageType, index);
+            if (msg == null) { interactor.Poke(error!); return; }
+            mid = msg.MessageId;
+        }
 
+        // 自我防护：不贴自己的消息（除非明确指定"我"）
+        if (_liveById.TryGetValue(mid, out LiveMessage? known) && known.IsSelf && target is not ("我" or "自己"))
+        {
+            interactor.Poke("这条消息是你自己发的，不建议给自己的消息贴表情，已跳过。请选别人发的消息");
+            return;
+        }
         OneBotClient? client = GetClient();
-        string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = msg.MessageId, emoji_id = emojiId.ToString(), set = true }, "贴表情", client);
+        string? err = await CallActionSafeAsync("set_msg_emoji_like", new { message_id = mid, emoji_id = emojiId.ToString(), set = true }, "贴表情", client);
         if (err != null) interactor.Poke(err);
     }
 
@@ -896,38 +979,97 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("撤回指定消息ID的QQ消息。messageId必须来自 QGetMessages。想快速撤回自己刚发的消息请用 DeleteMsgRecent（免ID）")]
-    public async Task DeleteMsg(
-        [Description("消息ID（必须来自QGetMessages）")] long messageId)
-    {
-        if (!Configuration.DeleteMsgEnabled) { interactor.Poke("撤回功能已禁用"); return; }
-        if (ShouldDelegate()) { interactor.Poke(DelegateHint("撤回", "DeleteMessage")); return; }
-        OneBotClient? client = GetClient();
-        string? err = await CallActionSafeAsync("delete_msg", new { message_id = messageId }, "撤回", client);
-        if (err != null) interactor.Poke(err + "（RetCode 1200 是 NapCat 内部异常的统称，常见原因：消息超过约2分钟撤回时限、非管理员撤回他人消息、目标是卡片/合并转发类消息、或 NapCat 内存中已丢失该消息记录——超时类消息无法撤回属平台限制）");
-    }
-
-    [XmlFunction(FunctionMode.OneShot)]
-    [Description("撤回自己刚发的最近一条消息（免ID，一步到位）。说错话、发错会话、内容有误时立刻用。私聊只能撤回自己的；群聊默认可撤回自己的，是管理员时可撤回他人")]
+    [Description("撤回消息（一步到位，无需先查ID）。说错话、发错会话、内容有误时立刻用。三种用法：1) 默认撤 target 的倒数第 index 条；2) 已知真实ID时传 messageId 直接撤（必须来自 QGetMessages 或 list 列表，严禁编造）；3) list=true 先出候选列表（序号+消息ID+折叠内容）再用 index 或 messageId 撤。私聊只能撤自己的；群聊默认撤自己的，是管理员时可撤他人")]
     public async Task DeleteMsgRecent(
-        [Description("目标群号或对方QQ（可省略，省略时自动找自己最近发的消息所在会话）")] long targetId = 0,
+        [Description("目标群号或对方QQ（可省略，省略时自动找目标最近发言所在会话）")] long targetId = 0,
         [Description("撤回谁的消息：默认\"我\"，管理员撤群员时填对方QQ号")] string target = "我",
-        [Description("消息类型：group或private，可省略")] string messageType = "")
+        [Description("消息类型：group或private，可省略")] string messageType = "",
+        [Description("撤回倒数第几条：默认1=最近一条，2=倒数第二条，以此类推")] int index = 1,
+        [Description("真实消息ID（可选，传入则直接撤该条，忽略 target/index/list）")] long messageId = 0,
+        [Description("true=只列出 target 最近10条候选消息（不撤回），看完用 index 或 messageId 撤")] bool list = false)
     {
         if (!Configuration.DeleteMsgEnabled) { interactor.Poke("撤回功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("撤回", "DeleteMessage")); return; }
+        index = Math.Clamp(index, 1, 20);
 
-        (LiveMessage? msg, _, _, string? error) = await ResolveTargetMessageAsync(target, targetId, messageType);
+        // 模式2：直接按真实ID撤
+        if (messageId != 0)
+        {
+            if (_liveById.TryGetValue(messageId, out LiveMessage? byId) && !byId.IsSelf && byId.GroupId == 0)
+            {
+                interactor.Poke("私聊无法撤回对方的消息（平台限制），只能撤回自己发的");
+                return;
+            }
+            await RecallByIdAsync(messageId);
+            return;
+        }
+
+        // list 与默认模式都需要先定位 target 的消息
+        (LiveMessage? msg, bool isGroup, long scopeId, string? error) =
+            await ResolveTargetMessageAsync(target, targetId, messageType, list ? 1 : index);
+
+        if (list)
+        {
+            // 模式3：出候选列表（即使精确定位失败也尽量列出来）
+            if (scopeId == 0 && msg == null) { interactor.Poke(error!); return; }
+            bool g = msg != null ? isGroup : messageType != "private";
+            long sc = msg != null ? scopeId : targetId;
+            bool self = target is "我" or "自己";
+            long botId = GetBotId();
+            bool byIdUin = long.TryParse(target, out long targetUin);
+            var candidates = _liveMessages
+                .Where(m => g ? m.GroupId == sc : (m.GroupId == 0 && m.PeerId == sc))
+                .Where(m => self ? m.IsSelf
+                    : byIdUin ? (m.UserId == targetUin || (botId != 0 && targetUin == botId && m.IsSelf))
+                    : m.Nickname.Contains(target, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(m => m.Time).ThenByDescending(m => m.Seq)
+                .Take(10).ToList();
+            if (candidates.Count == 0)
+            {
+                await BackfillHistoryAsync(g ? sc : 0, g ? 0 : sc, 20);
+                candidates = _liveMessages
+                    .Where(m => g ? m.GroupId == sc : (m.GroupId == 0 && m.PeerId == sc))
+                    .Where(m => self ? m.IsSelf
+                        : byIdUin ? (m.UserId == targetUin || (botId != 0 && targetUin == botId && m.IsSelf))
+                        : m.Nickname.Contains(target, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(m => m.Time).ThenByDescending(m => m.Seq)
+                    .Take(10).ToList();
+            }
+            if (candidates.Count == 0) { interactor.Poke($"未找到 {target} 的消息记录"); return; }
+            var sb2 = new StringBuilder();
+            sb2.AppendLine($"{target} 的最近 {candidates.Count} 条消息（撤回用：DeleteMsgRecent index=序号 或 messageId=消息ID）：");
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                var c = candidates[i];
+                sb2.AppendLine($"{i + 1}. [消息ID:{c.MessageId}] {(c.IsSelf ? SelfName : c.Nickname)}: {FoldText(c.Raw)}");
+            }
+            interactor.Poke(sb2.ToString());
+            return;
+        }
+
+        // 模式1：撤倒数第 index 条
         if (msg == null) { interactor.Poke(error!); return; }
         if (!msg.IsSelf && msg.GroupId == 0)
         {
             interactor.Poke("私聊无法撤回对方的消息（平台限制），只能撤回自己发的");
             return;
         }
+        await RecallByIdAsync(msg.MessageId);
+    }
 
+    /// <summary>按真实ID撤回并回执（含折叠内容摘要）</summary>
+    private async Task RecallByIdAsync(long mid)
+    {
         OneBotClient? client = GetClient();
-        string? err = await CallActionSafeAsync("delete_msg", new { message_id = msg.MessageId }, "撤回", client);
-        if (err != null) interactor.Poke(err + "（RetCode 1200 是 NapCat 内部异常的统称，常见原因：消息超过约2分钟撤回时限、非管理员撤回他人消息、目标是卡片/合并转发类消息、或 NapCat 内存中已丢失该消息记录——超时类消息无法撤回属平台限制）");
+        string? err = await CallActionSafeAsync("delete_msg", new { message_id = mid }, "撤回", client);
+        if (err != null)
+            interactor.Poke(err + "（RetCode 1200 是 NapCat 内部异常的统称，常见原因：消息超过约2分钟撤回时限、非管理员撤回他人消息、目标是卡片/合并转发类消息、或 NapCat 内存中已丢失该消息记录——超时类消息无法撤回属平台限制）");
+        else
+        {
+            string preview = _liveById.TryGetValue(mid, out LiveMessage? known)
+                ? $" {(known.IsSelf ? SelfName : known.Nickname)}: {FoldText(known.Raw)}" : "";
+            interactor.Poke($"已撤回 [消息ID:{mid}]{preview}。撤回已完成，无需再确认");
+        }
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -1040,51 +1182,48 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("引用回复某人最近一条消息（免ID，一步到位）。群聊里回应特定某人时优先用它（比@更清楚）；私聊接梗/辩论时引用对方原话再回更自然。要回复更早的指定消息，用 QGetMessages 查列表再 SendReplyMessage")]
+    [Description("引用回复（一步到位，无需先查ID）。群聊里回应特定某人时优先用它（比@更清楚）；私聊接梗/辩论时引用对方原话再回更自然。两种用法：1) 默认引用 target 的最近一条（index 可指定倒数第N条）；2) 已知真实ID时传 replyToId 直接引用该条（必须来自 QGetMessages 或撤回列表，严禁编造）")]
     public async Task ReplyRecent(
         [Description("回复内容")] string message,
-        [Description("目标用户QQ号或昵称，\"我\"表示自己")] string target,
+        [Description("目标用户QQ号或昵称，\"我\"表示自己（replyToId 模式下可省略）")] string target = "",
+        [Description("引用倒数第几条，默认1=最近一条")] int index = 1,
+        [Description("被回复消息的真实ID（可选，传入则直接引用该条，忽略 target/index）")] long replyToId = 0,
         [Description("目标群号或对方QQ（可省略，省略时自动推断该用户最近发言所在会话）")] long targetId = 0,
         [Description("消息类型：group或private，可省略")] string messageType = "")
     {
         if (!Configuration.ReplyEnabled) { interactor.Poke("引用回复功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("引用回复", "SendReplyMessage")); return; }
+        index = Math.Clamp(index, 1, 20);
 
-        (LiveMessage? msg, bool isGroup, long scopeId, string? error) = await ResolveTargetMessageAsync(target, targetId, messageType);
-        if (msg == null) { interactor.Poke(error!); return; }
-
-        string? result = await SendReplyCoreAsync(isGroup, scopeId, msg.MessageId, message);
-        if (result != null) interactor.Poke(result);
-    }
-
-    [XmlFunction(FunctionMode.OneShot)]
-    [Description("引用回复指定消息ID的消息。先用 QGetMessages 获取目标消息的[消息ID:xxx]（包括较早的历史消息），再调用本函数。replyToId 必须来自QGetMessages，严禁编造")]
-    public async Task SendReplyMessage(
-        [Description("回复内容")] string message,
-        [Description("被回复消息的真实ID（来自QGetMessages）")] long replyToId,
-        [Description("目标群号或对方QQ（可省略，省略时自动从缓存按ID推断会话）")] long targetId = 0,
-        [Description("消息类型：group或private，可省略")] string messageType = "")
-    {
-        if (!Configuration.ReplyEnabled) { interactor.Poke("引用回复功能已禁用"); return; }
-        if (ShouldDelegate()) { interactor.Poke(DelegateHint("引用回复", "SendReplyMessage")); return; }
-
-        bool isGroup = messageType != "private";
-        long scopeId = targetId;
-        if (scopeId == 0)
+        long mid; bool isGroup; long scopeId;
+        if (replyToId != 0)
         {
-            if (_liveById.TryGetValue(replyToId, out LiveMessage? known))
+            mid = replyToId;
+            isGroup = messageType != "private";
+            scopeId = targetId;
+            if (scopeId == 0)
             {
-                isGroup = known.GroupId != 0;
-                scopeId = isGroup ? known.GroupId : known.PeerId;
-            }
-            else
-            {
-                interactor.Poke("该消息ID不在缓存中，无法推断会话。请显式传 targetId（群号或对方QQ）与 messageType");
-                return;
+                if (_liveById.TryGetValue(replyToId, out LiveMessage? known))
+                {
+                    isGroup = known.GroupId != 0;
+                    scopeId = isGroup ? known.GroupId : known.PeerId;
+                }
+                else
+                {
+                    interactor.Poke("该消息ID不在缓存中，无法推断会话。请显式传 targetId（群号或对方QQ）与 messageType");
+                    return;
+                }
             }
         }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(target)) { interactor.Poke("请传 target（QQ号或昵称）或 replyToId（真实消息ID）"); return; }
+            (LiveMessage? msg, bool g, long sc, string? error) = await ResolveTargetMessageAsync(target, targetId, messageType, index);
+            if (msg == null) { interactor.Poke(error!); return; }
+            mid = msg.MessageId; isGroup = g; scopeId = sc;
+        }
 
-        string? result = await SendReplyCoreAsync(isGroup, scopeId, replyToId, message);
+        string? result = await SendReplyCoreAsync(isGroup, scopeId, mid, message);
         if (result != null) interactor.Poke(result);
     }
 
@@ -1118,7 +1257,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("转发某群/私聊最近N条消息为合并转发（免ID，一步到位）。自动从实时缓存取真实消息ID引用节点（含bot自己发的消息），图片/语音/表情等富媒体原样真实转发；缓存不足时自动回拉历史消息补齐；个别失效节点自动降级为文本重建节点保证转发成功")]
+    [Description("转发某群/私聊最近N条消息为合并转发（免ID，一步到位）。文本/图片/语音/视频/表情原样转发（图片按原始URL重发为真实图片）；文件/嵌套转发/引用/卡片/音乐走真实消息ID节点，结构完整保留；含bot自己发的消息，发送者显示真实QQ昵称；缓存不足时自动回拉历史消息补齐")]
     public async Task ForwardRecent(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("转发条数，1-50，默认5")] int count = 5,
@@ -1234,9 +1373,14 @@ public class QQEnhanceModule(
                     long id = idElem.ValueKind == JsonValueKind.Number ? idElem.GetInt64()
                         : long.Parse(idElem.GetString()!);
                     // 校验：id 必须在缓存中存在（编造/过期ID会被NapCat静默跳过，全部跳过则整条转发失败）
-                    if (!_liveById.ContainsKey(id))
+                    if (!_liveById.TryGetValue(id, out LiveMessage? idMsg))
+                    {
                         missingIds.Add(id);
-                    nodes.Add(new { type = "node", data = new { id = id.ToString() } });
+                        continue;
+                    }
+                    // schema 要求 nickname/content 必填（缺失直接 RetCode 1400），id 有效时这两个字段被忽略
+                    string idNick = idMsg.IsSelf ? SelfName : (string.IsNullOrEmpty(idMsg.Nickname) ? idMsg.UserId.ToString() : idMsg.Nickname);
+                    nodes.Add(new { type = "node", data = new { id = id.ToString(), nickname = idNick, uin = idMsg.UserId.ToString(), content = idMsg.Raw } });
                 }
                 else
                 {
@@ -1310,6 +1454,9 @@ public class QQEnhanceModule(
     private static readonly HttpClient _http = new HttpClient { Timeout = TimeSpan.FromSeconds(12) };
 
     /// <summary>CQ码转义（custom音乐卡片字段用）</summary>
+    /// <summary>折叠长文本：>15字符时显示首5...尾5（省token，AI可识别）</summary>
+    private static string FoldText(string s) => s.Length <= 15 ? s : s[..5] + "..." + s[^5..];
+
     private static string CqEscape(string s) =>
         s.Replace("&", "&amp;").Replace("[", "&#91;").Replace("]", "&#93;").Replace(",", "&#44;");
 
@@ -1641,7 +1788,7 @@ public class QQEnhanceModule(
     // ==================== 消息查询 ====================
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("获取群聊/私聊最近消息及每条的[消息ID:xxx]（真实ID，可为负数），用于撤回(DeleteMsg)/贴表情(SetEmoji)/引用(SendReplyMessage)/转发。群聊传 groupId；私聊传 userId。缓存不足时自动回拉历史消息补齐（历史的ID同样真实可用）")]
+    [Description("纯查询工具：获取群聊/私聊最近消息及每条的[消息ID:xxx]（真实ID，可为负数）。仅用于查看上下文或取ID，撤回/贴表情/引用回复用 DeleteMsgRecent/SetEmojiRecent/ReplyRecent 直接一步到位，无需先调本函数。群聊传 groupId；私聊传 userId。缓存不足时自动回拉历史消息补齐（历史的ID同样真实可用）。15秒内同一会话查询超过2次会被防抖拒绝")]
     public async Task QGetMessages(
         [Description("群号（私聊时传0）")] long groupId = 0,
         [Description("QQ号（仅私聊时需要）")] long userId = 0,
@@ -1650,6 +1797,21 @@ public class QQEnhanceModule(
         OneBotClient? client = GetClient();
         if (client == null) { interactor.Poke("获取消息失败：QQ客户端不可用"); return; }
         if (groupId == 0 && userId == 0) { interactor.Poke("群聊请传 groupId，私聊请传 userId"); return; }
+
+        // 防抖保护：同一会话15秒内查询超过2次进入冷却，防止AI递归查询
+        string scopeKey = groupId != 0 ? $"g{groupId}" : $"u{userId}";
+        lock (_qgetLock)
+        {
+            DateTime now = DateTime.Now;
+            var times = _qgetTimes.GetOrAdd(scopeKey, _ => new List<DateTime>());
+            times.RemoveAll(t => (now - t).TotalSeconds > 15);
+            if (times.Count >= 2)
+            {
+                interactor.Poke("查询过于频繁：该会话15秒内已查询2次，请稍后再试。列表中的[消息ID:xxx]短期内不会变化，直接用上次结果里的ID操作即可，无需重复查询");
+                return;
+            }
+            times.Add(now);
+        }
         try
         {
             count = Math.Clamp(count, 1, 50);
@@ -1827,6 +1989,7 @@ public class QQEnhanceModule(
     /// <summary>收到QQ消息时按概率在消息末尾附加互动提示（动态填入发言人参数，AI照抄即可调用，无需查ID）</summary>
     private string OnChatSendHint(string message)
     {
+        if (!Configuration.InteractionHintEnabled) return message;
         if (string.IsNullOrWhiteSpace(Configuration.InteractionHintText)) return message;
         // 只附加在 QQ 来源的消息上（群聊/私聊标签），不影响其他模块的消息
         bool isGroupMsg = message.Contains("[群聊消息(");
