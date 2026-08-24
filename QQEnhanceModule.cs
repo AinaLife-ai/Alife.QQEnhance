@@ -5,7 +5,6 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
-using System.Net.WebSockets;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
@@ -38,6 +37,14 @@ public class QQEnhanceConfig
     [DisplayName("撤回")]
     [Description("启用撤回QQ消息功能")]
     public bool DeleteMsgEnabled { get; set; } = true;
+
+    [DisplayName("撤回成功回执")]
+    [Description("开启后撤回成功会推送确认消息；默认关闭=成功静默，撤回请求被接受后立即返回，后台自动核验结果，只有确认失败（或核验异常）才报错")]
+    public bool RecallConfirmEnabled { get; set; } = false;
+
+    [DisplayName("撤回核验延迟(秒)")]
+    [Description("撤回后等待多久开始拉历史核验结果（QQ服务器同步需要一点时间），默认1秒；若首次核验消息仍在，会在再等1.5秒后复查一次才报失败")]
+    public double RecallVerifyDelaySeconds { get; set; } = 1.0;
 
     [DisplayName("禁言")]
     [Description("启用禁言QQ群成员功能")]
@@ -85,11 +92,11 @@ public class QQEnhanceConfig
     public double NoticeCooldownSeconds { get; set; } = 10;
 
     [DisplayName("被赞感知")]
-    [Description("感知资料卡被点赞并提示AI可回赞（依赖实时消息捕获开启），默认关闭")]
+    [Description("感知资料卡被点赞并提示AI可回赞（走官方连接事件，无需额外上报），默认关闭")]
     public bool PerceiveProfileLike { get; set; } = false;
 
     [DisplayName("被贴表情感知")]
-    [Description("感知群消息被贴表情并提示AI（依赖实时消息捕获开启），默认关闭")]
+    [Description("感知群消息被贴表情并提示AI（走官方连接事件，无需额外上报），默认关闭")]
     public bool PerceiveEmojiLike { get; set; } = false;
 
     [DisplayName("引用回复")]
@@ -136,20 +143,20 @@ public class QQEnhanceConfig
     [Description("输入中状态最大持续时长")]
     public double TypingMaxSeconds { get; set; } = 60.0;
 
-    [DisplayName("实时消息捕获")]
-    [Description("独立WS监听实时事件捕获真实消息ID（撤回/贴表情/引用/转发的可靠性核心），带断线自动重连")]
+    [DisplayName("实时消息捕获(已废弃)")]
+    [Description("已废弃：4.9.11起不再开第二条WS，所有功能建立在官方连接+历史回拉之上。此开关无效，仅为兼容旧配置保留")]
     public bool LiveCaptureEnabled { get; set; } = true;
 
     [DisplayName("实时消息缓存大小")]
     [Description("缓存最近N条消息的消息ID/内容，用于QGetMessages/ReplyRecent等定位")]
     public int LiveCacheSize { get; set; } = 500;
 
-    [DisplayName("捕获连接地址(可选)")]
-    [Description("留空=复用QQ聊天的OneBot连接地址。若要捕获bot自己发的消息：在NapCat额外加一个WS服务端（仅此适配器开reportSelfMessage），把它的地址填这里。QChat主连接务必保持reportSelfMessage关闭，否则AI会收到自己的消息造成回环")]
+    [DisplayName("捕获连接地址(已废弃)")]
+    [Description("已废弃：4.9.11起不再使用，仅为兼容旧配置保留")]
     public string CaptureUrl { get; set; } = "";
 
-    [DisplayName("捕获连接Token(可选)")]
-    [Description("捕获连接地址独立设置时的鉴权Token，留空则复用QQ聊天的Token")]
+    [DisplayName("捕获连接Token(已废弃)")]
+    [Description("已废弃：4.9.11起不再使用，仅为兼容旧配置保留")]
     public string CaptureToken { get; set; } = "";
 }
 
@@ -214,7 +221,7 @@ public class QQEnhanceModule(
     private long GetBotId()
     {
         OneBotClient? client = GetClient();
-        return client?.BotId is > 0 ? client.BotId : _liveBotId;
+        return client?.BotId ?? 0;
     }
 
     // ==================== 幼央兼容检测 ====================
@@ -277,7 +284,7 @@ public class QQEnhanceModule(
     private readonly Dictionary<long, CancellationTokenSource> _typingCts = new();
     private readonly object _typingLock = new();
 
-    // ==================== 实时消息捕获（真实消息ID来源，带断线重连） ====================
+    // ==================== 消息缓存（历史回拉+发送自存，不依赖任何事件上报） ====================
     private sealed class LiveMessage
     {
         public long MessageId { get; init; }
@@ -298,30 +305,23 @@ public class QQEnhanceModule(
         public long Seq { get; init; }
     }
 
-    private long _liveBotId;
     private long _liveSeq;
     private readonly ConcurrentQueue<LiveMessage> _liveMessages = new();
     private readonly ConcurrentDictionary<long, LiveMessage> _liveById = new();
 
     // ==================== 撤回确认跟踪 ====================
-    // NapCat 对 delete_msg 可能返回成功（retcode 0）但 QQ 实际拒绝撤回
-    // （超2分钟时限、NapCat缓存丢失等），唯一可靠确认是事件流里的 group_recall/friend_recall 通知
-    /// <summary>已确认撤回的消息ID（mid -> 撤回unix秒），用于过滤缓存与列表</summary>
+    // NapCat 对 delete_msg 可能返回成功（retcode 0）但 QQ 实际拒绝撤回（超2分钟时限等），
+    // 本插件不依赖任何事件上报——撤回后经历史记录比对核验，确认成功的在此登记
+    /// <summary>已确认撤回的消息ID（mid -> 撤回unix秒），用于缓存存档标记与列表标注</summary>
     private readonly ConcurrentDictionary<long, long> _recalledIds = new();
-    /// <summary>等待撤回确认通知的回调（mid -> TCS）</summary>
-    private readonly ConcurrentDictionary<long, TaskCompletionSource<bool>> _recallWaiters = new();
-    /// <summary>捕获链路最近收到任意帧的时间（用于判断撤回确认通道是否可用）</summary>
-    private DateTime _lastCaptureTick = DateTime.MinValue;
-    private bool CaptureAlive => (DateTime.UtcNow - _lastCaptureTick).TotalSeconds < 60;
+    private readonly ConcurrentDictionary<long, byte> _recallVerifying = new();
 
-    /// <summary>登记一条已撤回消息：移出ID索引、唤醒等待方、定时修剪</summary>
+    /// <summary>登记一条已撤回消息：保留在缓存中作存档但打上标记（列表标注【已撤回】），定时修剪</summary>
     private void MarkRecalled(long mid)
     {
         if (mid == 0) return;
         _recalledIds[mid] = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        _liveById.TryRemove(mid, out _);
-        if (_recallWaiters.TryRemove(mid, out TaskCompletionSource<bool>? tcs))
-            tcs.TrySetResult(true);
+        if (_liveById.TryGetValue(mid, out LiveMessage? known)) known.IsRecalled = true;
         if (_recalledIds.Count > 2000)
         {
             long cutoff = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 3600;
@@ -339,7 +339,7 @@ public class QQEnhanceModule(
     private void AddLiveMessage(LiveMessage msg)
     {
         if (msg.MessageId == 0) return;
-        if (_recalledIds.ContainsKey(msg.MessageId)) return; // 已确认撤回的消息不再入缓存
+        if (_recalledIds.ContainsKey(msg.MessageId)) msg.IsRecalled = true; // 已确认撤回的消息保留入缓存并标注（存档）
         if (!_liveById.TryAdd(msg.MessageId, msg)) return;
         _liveMessages.Enqueue(msg);
         TrimLiveCache();
@@ -350,150 +350,6 @@ public class QQEnhanceModule(
         int max = Math.Max(50, Configuration.LiveCacheSize);
         while (_liveMessages.Count > max && _liveMessages.TryDequeue(out LiveMessage? old))
             _liveById.TryRemove(old.MessageId, out _);
-    }
-
-    /// <summary>捕获主循环：连接 + 接收 + 断线指数退避重连（5s→30s封顶）</summary>
-    private async Task LiveCaptureMainAsync(OneBotClient client, CancellationToken ct)
-    {
-        int failCount = 0;
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                string url = !string.IsNullOrWhiteSpace(Configuration.CaptureUrl) ? Configuration.CaptureUrl : client.Url;
-                string token = !string.IsNullOrWhiteSpace(Configuration.CaptureUrl) && !string.IsNullOrWhiteSpace(Configuration.CaptureToken)
-                    ? Configuration.CaptureToken : client.Token;
-                if (string.IsNullOrEmpty(url)) return;
-
-                using var ws = new ClientWebSocket();
-                if (!string.IsNullOrEmpty(token))
-                    ws.Options.SetRequestHeader("Authorization", $"Bearer {token}");
-                await ws.ConnectAsync(new Uri(url), ct);
-                logger.LogInformation("QQ增强：实时消息捕获已连接 {Url}", url);
-                failCount = 0;
-
-                await LiveReceiveLoopAsync(ws, ct);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception e)
-            {
-                logger.LogWarning(e, "QQ增强：实时消息捕获连接异常");
-            }
-
-            if (ct.IsCancellationRequested) return;
-            failCount++;
-            int delaySec = Math.Min(30, 5 * failCount);
-            logger.LogInformation("QQ增强：{Delay}秒后重连实时捕获", delaySec);
-            try { await Task.Delay(TimeSpan.FromSeconds(delaySec), ct); }
-            catch (OperationCanceledException) { return; }
-        }
-    }
-
-    private async Task LiveReceiveLoopAsync(ClientWebSocket ws, CancellationToken ct)
-    {
-        var buffer = new byte[64 * 1024];
-        while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
-        {
-            using var ms = new MemoryStream();
-            WebSocketReceiveResult result;
-            do
-            {
-                result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
-                if (result.MessageType == WebSocketMessageType.Close) return;
-                ms.Write(buffer, 0, result.Count);
-            } while (!result.EndOfMessage);
-
-            using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(ms.ToArray()));
-            JsonElement root = doc.RootElement;
-            _lastCaptureTick = DateTime.UtcNow;
-
-            if (!root.TryGetProperty("post_type", out var pt)) continue;
-            string postType = pt.GetString() ?? "";
-
-            // 握手：lifecycle connect 拿 self_id
-            if (postType == "meta_event" &&
-                root.TryGetProperty("meta_event_type", out var met) &&
-                met.GetString() == "lifecycle")
-            {
-                if (root.TryGetProperty("self_id", out var self)) _liveBotId = ReadLong(self);
-                continue;
-            }
-
-            // notice 感知（被赞/被贴表情）——官方事件模型无对应字段，只能在原始JSON层处理
-            if (postType == "notice")
-            {
-                HandleCaptureNotice(root);
-                continue;
-            }
-
-            if (postType != "message" && postType != "message_sent") continue;
-
-            long msgId = ReadPropLong(root, "message_id");
-            if (msgId == 0) continue;
-
-            long userId = ReadPropLong(root, "user_id");
-            bool isSelf = postType == "message_sent" || (_liveBotId != 0 && userId == _liveBotId);
-            long groupId = ReadPropLong(root, "group_id");
-            long time = ReadPropLong(root, "time");
-            bool isPrivate = groupId == 0;
-            // 私聊会话对端：自己发的看 target_id，别人发的看 user_id
-            long peerId = 0;
-            if (isPrivate)
-                peerId = isSelf ? ReadPropLong(root, "target_id") : userId;
-
-            string nickname = "";
-            if (root.TryGetProperty("sender", out var se) && se.ValueKind == JsonValueKind.Object)
-            {
-                nickname = ReadPropString(se, "card");
-                if (string.IsNullOrEmpty(nickname)) nickname = ReadPropString(se, "nickname");
-            }
-
-            string raw = ExtractRawText(root);
-            var (fullRaw, idOnly) = ExtractFullText(root);
-
-            AddLiveMessage(new LiveMessage {
-                MessageId = msgId, UserId = userId, GroupId = groupId, PeerId = peerId,
-                Nickname = nickname, Raw = raw, FullRaw = fullRaw, IdNodeOnly = idOnly, Time = time, IsSelf = isSelf,
-                Seq = Interlocked.Increment(ref _liveSeq)
-            });
-        }
-    }
-
-    /// <summary>捕获链路上的 notice：被赞资料卡 / 被贴表情 → 注入轻量行动建议（30秒冷却）</summary>
-    private void HandleCaptureNotice(JsonElement root)
-    {
-        try
-        {
-            string noticeType = ReadPropString(root, "notice_type");
-
-            if (noticeType == "profile_like" && Configuration.PerceiveProfileLike)
-            {
-                if (DateTime.Now - _lastLikePromptTime < NoticeCooldown) return;
-                _lastLikePromptTime = DateTime.Now;
-                long operatorId = ReadPropLong(root, "operator_id");
-                string nick = ReadPropString(root, "operator_nick");
-                long times = ReadPropLong(root, "times");
-                string who = string.IsNullOrEmpty(nick) ? $"用户{operatorId}" : $"用户{operatorId}({nick})";
-                interactor.Poke($"[System {who} 赞了你的资料卡{(times > 0 ? $" {times} 次" : "")}。可以回赞（SendQQLikes qq={operatorId}）或戳一戳回应，也可以忽略]");
-            }
-            else if (noticeType == "group_msg_emoji_like" && Configuration.PerceiveEmojiLike)
-            {
-                if (DateTime.Now - _lastEmojiLikePromptTime < NoticeCooldown) return;
-                _lastEmojiLikePromptTime = DateTime.Now;
-                long uid = ReadPropLong(root, "user_id");
-                long gid = ReadPropLong(root, "group_id");
-                long mid = ReadPropLong(root, "message_id");
-                string who = $"用户{uid}";
-                interactor.Poke($"[System {who} 在群 {gid} 给消息[消息ID:{mid}]贴了表情。可以贴回去（SetEmojiRecent messageId={mid}）或接话回应，也可以忽略]");
-            }
-        }
-        catch (Exception e)
-        {
-            logger.LogDebug(e, "处理捕获notice失败");
-        }
     }
 
     // ==================== JSON 读取小工具 ====================
@@ -737,8 +593,8 @@ public class QQEnhanceModule(
             return Task.CompletedTask;
         }
 
-        if (Configuration.PerceiveGroupBan || Configuration.PerceiveGroupIncrease || Configuration.PokeDecideEnabled)
-            client.EventReceived += OnEventReceived;
+        // 始终订阅官方连接事件：引用段提取（被引用消息真实ID）、感知通知都走这里——不开第二条WS
+        client.EventReceived += OnEventReceived;
 
         // 输入中状态：幼央接管时自动让位（避免双插件同时发 set_input_status）
         if (Configuration.TypingIndicatorEnabled && !ShouldDelegate())
@@ -752,8 +608,6 @@ public class QQEnhanceModule(
 
         _ = FetchBotNicknameAsync(client);
 
-        if (Configuration.LiveCaptureEnabled)
-            _ = LiveCaptureMainAsync(client, DestroyCancellationToken);
 
         return Task.CompletedTask;
     }
@@ -829,29 +683,6 @@ public class QQEnhanceModule(
     // ==================== 消息定位（缓存 + 历史回拉兜底） ====================
 
     /// <summary>在指定会话中定位目标用户最近一条消息。target 为纯数字按QQ号精确匹配，"我"匹配自己，否则按昵称包含匹配</summary>
-    private LiveMessage? FindLatestFromUser(long scopeId, string target, bool isGroup)
-    {
-        target = target.Trim();
-        bool byId = long.TryParse(target, out long targetUin);
-        long botId = GetBotId();
-        bool self = target is "我" or "自己" || (byId && botId != 0 && targetUin == botId);
-
-        var candidates = _liveMessages
-            .Where(m => isGroup ? m.GroupId == scopeId : (m.GroupId == 0 && m.PeerId == scopeId))
-            .Where(NotRecalled)
-            .Where(m => self ? m.IsSelf
-                : byId ? m.UserId == targetUin
-                : m.Nickname.Contains(target, StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(m => m.Time)
-            .ThenByDescending(m => m.Seq)
-            .ToList();
-
-        // 昵称歧义检测：命中多个不同QQ号时返回null并在调用处提示
-        if (!byId && !self && candidates.Select(m => m.UserId).Distinct().Count() > 1)
-            return null;
-        return candidates.FirstOrDefault();
-    }
-
     /// <summary>全缓存范围定位目标用户最近一条消息（用于 targetId 缺省时推断会话）</summary>
     private LiveMessage? FindFromUser(long scopeId, string target, bool isGroup, int index, bool includeRecalled = false)
     {
@@ -924,7 +755,7 @@ public class QQEnhanceModule(
             scopeId = isGroup ? any.GroupId : any.PeerId;
         }
 
-        // 关键：定位前无条件刷新历史——bot经官方QChat发的消息只有在NapCat开启message_sent上报时才进捕获，
+        // 关键：定位前无条件刷新历史——不依赖任何事件上报（bot经官方QChat发的消息不一定进缓存），
         // 仅靠缓存会拿到陈旧条目（撤回目标其实是几小时前的消息→超2分钟必失败）。历史回拉的 message_id 真实可撤回
         await BackfillHistoryAsync(isGroup ? scopeId : 0, isGroup ? 0 : scopeId, Math.Max(20, index + 10));
         LiveMessage? live = FindFromUser(scopeId, target, isGroup, index, includeRecalled);
@@ -1106,49 +937,107 @@ public class QQEnhanceModule(
         await RecallByIdAsync(msg.MessageId);
     }
 
-    /// <summary>按真实ID撤回并回执（含折叠内容摘要）。NapCat 可能对实际失败的 delete_msg 也返回成功，
-    /// 因此在捕获链路可用时等待 group_recall/friend_recall 通知做真实确认，绝不谎报成功</summary>
+    /// <summary>按真实ID撤回并回执（含折叠内容摘要）。NapCat 可能对实际失败的 delete_msg 也返回成功回包，
+    /// 且本插件不依赖任何事件上报——撤回后重新拉历史核验：消息从历史中消失=真撤回，还在=明确失败，绝不谎报</summary>
     private async Task RecallByIdAsync(long mid)
     {
         OneBotClient? client = GetClient();
+        _liveById.TryGetValue(mid, out LiveMessage? known);
+        string preview = known != null
+            ? $" {(known.IsSelf ? SelfName : known.Nickname)}: {FoldText(known.Raw)}" : "";
 
-        // 先登记确认等待（必须在发请求之前，避免通知先到而丢失）
-        bool canVerify = CaptureAlive;
-        Task<bool>? waitTask = null;
-        if (canVerify)
+        // 自己的消息超约2分钟是平台硬时限，必然失败——直接如实拒绝，避免 NapCat 假成功误导
+        if (known is { IsSelf: true } &&
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds() - known.Time > 115)
         {
-            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _recallWaiters[mid] = tcs;
-            waitTask = tcs.Task;
+            long ageMin = (DateTimeOffset.UtcNow.ToUnixTimeSeconds() - known.Time) / 60;
+            interactor.Poke($"[消息ID:{mid}]{preview} 发送于约 {ageMin} 分钟前，已超过约2分钟撤回时限（平台硬限制，任何方式都撤不掉），未执行撤回。不要再尝试撤这条");
+            return;
         }
 
         string? err = await CallActionSafeAsync("delete_msg", new { message_id = mid }, "撤回", client);
         if (err != null)
         {
-            _recallWaiters.TryRemove(mid, out _);
             interactor.Poke(err + "（RetCode 1200 是 NapCat 内部异常的统称，常见原因：消息超过约2分钟撤回时限、非管理员撤回他人消息、目标是卡片/合并转发类消息、或 NapCat 内存中已丢失该消息记录——超时类消息无法撤回属平台限制）");
             return;
         }
 
-        string preview = _liveById.TryGetValue(mid, out LiveMessage? known)
-            ? $" {(known.IsSelf ? SelfName : known.Nickname)}: {FoldText(known.Raw)}" : "";
-
-        if (!canVerify || waitTask == null)
+        // 后台核验：撤回请求被接受后立即返回（成功静默），核验在后台进行，只有确认失败/核验异常才报错
+        bool canVerify = known != null && (known.GroupId != 0 || known.PeerId != 0) &&
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds() - known.Time < 110;
+        if (!canVerify)
         {
-            // 捕获链路不可用，无法二次确认——如实说明
-            interactor.Poke($"撤回请求已发送并被 NapCat 接受 [消息ID:{mid}]{preview}。实时捕获未连接，无法二次确认撤回结果；若消息仍在，多半是已超过约2分钟撤回时限（平台限制）");
+            if (Configuration.RecallConfirmEnabled)
+                interactor.Poke($"撤回请求已发送并被 NapCat 接受 [消息ID:{mid}]{preview}（该消息不在缓存或太旧，无法自动核验；可用 QGetMessages 核实结果）");
             return;
         }
+        if (_recallVerifying.TryAdd(mid, 0))
+            _ = VerifyRecallInBackgroundAsync(mid, preview, known!);
+    }
 
-        Task finished = await Task.WhenAny(waitTask, Task.Delay(TimeSpan.FromSeconds(5)));
-        _recallWaiters.TryRemove(mid, out _);
-        if (finished == waitTask)
+    /// <summary>后台撤回核验：拉历史比对，消息消失=真撤回（成功默认静默），仍在=报错，核验异常=报错。
+    /// 两段式：配置延迟后先查一次；仍在则再等1.5秒复查，避免QQ同步延迟误判失败</summary>
+    private async Task VerifyRecallInBackgroundAsync(long mid, string preview, LiveMessage known)
+    {
+        try
         {
-            interactor.Poke($"已撤回 [消息ID:{mid}]{preview}（已收到QQ撤回确认）。撤回已完成，无需再确认");
+            await Task.Delay(TimeSpan.FromSeconds(Math.Clamp(Configuration.RecallVerifyDelaySeconds, 0.2, 30)));
+            bool? gone = await CheckGoneFromHistoryAsync(mid, known);
+            if (gone == false)
+            {
+                await Task.Delay(1500);
+                gone = await CheckGoneFromHistoryAsync(mid, known);
+            }
+            if (gone == true)
+            {
+                MarkRecalled(mid);
+                if (Configuration.RecallConfirmEnabled)
+                    interactor.Poke($"已撤回 [消息ID:{mid}]{preview}（已核验历史记录，消息确实消失）。撤回已完成，无需再确认");
+            }
+            else if (gone == false)
+            {
+                interactor.Poke($"撤回失败：[消息ID:{mid}]{preview} 并未真正撤回（历史核验消息仍在）。最常见原因是消息已超过约2分钟撤回时限（平台限制，无法补救），或非管理员撤他人消息。不要再重复撤回这条");
+            }
+            else
+            {
+                interactor.Poke($"撤回结果核验异常：[消息ID:{mid}]{preview} 历史核验请求失败，无法确认撤回结果；可用 QGetMessages 核实");
+            }
         }
-        else
+        catch (Exception e)
         {
-            interactor.Poke($"撤回请求已被 NapCat 接受，但5秒内未收到实际撤回通知——[消息ID:{mid}]{preview} 很可能并未真正撤回。最常见原因是消息已超过约2分钟撤回时限（平台限制，无法补救），或该ID在 NapCat 缓存中已失效。不要再重复撤回这条；可用 QGetMessages 核实消息是否还在");
+            logger.LogDebug(e, "后台撤回核验异常 mid={Mid}", mid);
+        }
+        finally
+        {
+            _recallVerifying.TryRemove(mid, out _);
+        }
+    }
+
+    /// <summary>核验消息是否已从历史记录消失（撤回成功的唯一可靠判据，不依赖任何事件上报）。
+    /// true=已消失（撤回成功），false=仍在（撤回失败），null=核验不了</summary>
+    private async Task<bool?> CheckGoneFromHistoryAsync(long mid, LiveMessage known)
+    {
+        OneBotClient? client = GetClient();
+        if (client == null) return null;
+        try
+        {
+            JsonElement data = known.GroupId != 0
+                ? await client.CallActionAsync<JsonElement>("get_group_msg_history",
+                    new { group_id = known.GroupId, count = 50 })
+                : await client.CallActionAsync<JsonElement>("get_friend_msg_history",
+                    new { user_id = known.PeerId, count = 50 });
+            if (data.ValueKind != JsonValueKind.Object ||
+                !data.TryGetProperty("messages", out var msgs) ||
+                msgs.ValueKind != JsonValueKind.Array)
+                return null;
+            foreach (JsonElement m in msgs.EnumerateArray())
+                if (ReadPropLong(m, "message_id") == mid) return false;
+            return true;
+        }
+        catch (Exception e)
+        {
+            logger.LogDebug(e, "撤回结果历史核验失败 mid={Mid}", mid);
+            return null;
         }
     }
 
@@ -1359,7 +1248,7 @@ public class QQEnhanceModule(
             .ThenBy(m => m.Seq)
             .ToList();
 
-        // 转发前无条件刷新历史，保证转发的是此刻最新消息（缓存可能因 message_sent 未上报而缺条目）
+        // 转发前无条件刷新历史，保证转发的是此刻最新消息（不依赖任何事件上报）
         await BackfillHistoryAsync(isGroup ? targetId : 0, isGroup ? 0 : targetId, count);
         var matches = Query();
 
@@ -1904,14 +1793,14 @@ public class QQEnhanceModule(
                 .ThenBy(m => m.Seq)
                 .ToList();
 
-            // 查询前无条件刷新历史，保证拿到的是此刻最新（缓存可能因 message_sent 未上报而缺自己刚发的消息）
+            // 查询前无条件刷新历史，保证拿到的是此刻最新（不依赖任何事件上报）
             await BackfillHistoryAsync(groupId, userId, count);
             var matches = Query();
 
             if (matches.Count == 0)
             {
                 interactor.Poke(groupId != 0
-                    ? $"群 {groupId} 暂无消息记录（实时捕获连接后开始记录；若持续为空请检查实时消息捕获配置与OneBot连接）"
+                    ? $"群 {groupId} 暂无消息记录（已尝试历史回拉也为空；请检查OneBot连接与群号是否正确）"
                     : $"与 {userId} 暂无消息记录");
                 return;
             }
@@ -1952,7 +1841,21 @@ public class QQEnhanceModule(
                 return;
 
             string? noticeType = noticeEvent.NoticeType;
-            if (noticeType == "group_ban" && Configuration.PerceiveGroupBan)
+            if (noticeType == "profile_like" && Configuration.PerceiveProfileLike)
+            {
+                if (DateTime.Now - _lastLikePromptTime < NoticeCooldown) return;
+                _lastLikePromptTime = DateTime.Now;
+                long uid = noticeEvent.UserId;
+                interactor.Poke($"[System 用户{uid} 赞了你的资料卡。可以回赞（SendQQLikes qq={uid}）或戳一戳回应，也可以忽略]");
+            }
+            else if (noticeType == "group_msg_emoji_like" && Configuration.PerceiveEmojiLike)
+            {
+                if (DateTime.Now - _lastEmojiLikePromptTime < NoticeCooldown) return;
+                _lastEmojiLikePromptTime = DateTime.Now;
+                long uid = noticeEvent.UserId;
+                interactor.Poke($"[System 用户{uid} 在群 {noticeEvent.GroupId} 给你的消息贴了表情。可以贴回去（SetEmojiRecent target={uid} targetId={noticeEvent.GroupId}）或接话回应，也可以忽略]");
+            }
+            else if (noticeType == "group_ban" && Configuration.PerceiveGroupBan)
             {
                 if (noticeEvent.SelfId == noticeEvent.UserId)
                 {
@@ -2094,9 +1997,11 @@ public class QQEnhanceModule(
         {
             long botId = GetClient()?.BotId ?? 0;
             if (botId != 0 && !string.IsNullOrEmpty(uin) && uin != botId.ToString() &&
-                (message.Contains($"的回复]@{botId}") || message.Contains($"@{botId}")))
+                (message.Contains($"的回复]@{botId}") || message.Contains($"@{botId}") ||
+                 message.Contains($"对\"{botId}：")))
             {
-                string reason = message.Contains($"的回复]@{botId}") ? "引用了你的消息" : "@了你";
+                bool quoted = message.Contains($"的回复]@{botId}") || message.Contains($"对\"{botId}：");
+                string reason = quoted ? "引用了你的消息" : "@了你";
                 hint += $"（{nick}{reason}，回应时可用上面的 ReplyRecent 参数引用TA这条）";
             }
         }
@@ -2131,7 +2036,7 @@ public class QQEnhanceModule(
 
             var cts = new CancellationTokenSource();
             _typingCts[userId] = cts;
-            _ = RunTypingLoopAsync(userId, cts.Token);
+            _ = RunTypingLoopAsync(userId, cts);
         }
     }
 
@@ -2145,10 +2050,11 @@ public class QQEnhanceModule(
         }
     }
 
-    private async Task RunTypingLoopAsync(long userId, CancellationToken ct)
+    private async Task RunTypingLoopAsync(long userId, CancellationTokenSource cts)
     {
         OneBotClient? client = GetClient();
         if (client == null) return;
+        CancellationToken ct = cts.Token;
 
         try
         {
@@ -2174,7 +2080,8 @@ public class QQEnhanceModule(
         {
             lock (_typingLock)
             {
-                _typingCts.Remove(userId);
+                if (_typingCts.TryGetValue(userId, out CancellationTokenSource? cur) && cur == cts)
+                    _typingCts.Remove(userId);
             }
         }
     }
