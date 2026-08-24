@@ -184,15 +184,21 @@ public class QQEnhanceModule(
     /// <summary>bot 真实昵称（转发/显示用），获取失败后退回"我"</summary>
     private string SelfName => _botNickname ?? "我";
 
-    /// <summary>启动时拉取一次 bot 昵称（get_login_info），失败静默</summary>
+    private DateTime _botNicknameLastTry = DateTime.MinValue;
+
+    /// <summary>拉取 bot 昵称（get_login_info）。启动时可能 WS 未连接导致失败，所以带 60 秒节流的重试：
+    /// 每次转发/查询用到 SelfName 前都会再试一次，直到成功</summary>
     private async Task FetchBotNicknameAsync(OneBotClient client)
     {
+        if (_botNickname != null) return;
+        if (DateTime.Now - _botNicknameLastTry < TimeSpan.FromSeconds(60)) return;
+        _botNicknameLastTry = DateTime.Now;
         try
         {
             var info = await client.CallActionAsync<LoginInfoResult>("get_login_info");
             if (!string.IsNullOrWhiteSpace(info?.Nickname)) _botNickname = info!.Nickname;
         }
-        catch { /* 忽略，用"我"兜底 */ }
+        catch { /* 忽略，用"我"兜底，60秒后重试 */ }
     }
 
     private sealed class LoginInfoResult
@@ -778,7 +784,21 @@ public class QQEnhanceModule(
         {
             LiveMessage? any = FindLatestFromUserAnywhere(target);
             if (any == null)
-                return (null, isGroup, 0, $"未找到 {target} 的任何消息记录（可能不在缓存中）。请显式传 targetId（群号或对方QQ）后重试");
+            {
+                // 缓存没有该用户消息（典型：bot自己通过QChat发的消息不在捕获中）——
+                // 先对最近活跃的会话回拉历史再查一次，实现真正的"免ID一步撤回"
+                var recentScopes = _liveMessages
+                    .OrderByDescending(m => m.Time).ThenByDescending(m => m.Seq)
+                    .Select(m => (g: m.GroupId, p: m.PeerId))
+                    .Distinct()
+                    .Take(3)
+                    .ToList();
+                foreach (var (g, p) in recentScopes)
+                    await BackfillHistoryAsync(g, g != 0 ? 0 : p, 20);
+                any = FindLatestFromUserAnywhere(target);
+            }
+            if (any == null)
+                return (null, isGroup, 0, $"未找到 {target} 的任何消息记录（缓存+历史回拉均无）。请显式传 targetId（群号或对方QQ）后重试");
             isGroup = any.GroupId != 0;
             scopeId = isGroup ? any.GroupId : any.PeerId;
         }
@@ -1132,14 +1152,21 @@ public class QQEnhanceModule(
             return;
         }
 
+        // 含自己的消息且昵称未知时，先补拉 bot 昵称（启动时WS未连接会导致首次拉取失败）
+        if (_botNickname == null && matches.Any(m => m.IsSelf))
+        {
+            OneBotClient? c0 = GetClient();
+            if (c0 != null) await FetchBotNicknameAsync(c0);
+        }
+
         // 内容节点优先（方案A）：直接用缓存/历史里的消息文本构造自定义节点。
         // 不经过 NapCat 的 MessageUnique id 查找，bot自己发的、历史补拉的一条都不会丢。
         // 代价：图片/语音等富媒体以[图片]等占位文字呈现。
         var nodes = matches.Select(m => (object)new {
             type = "node",
             data = new {
-                name = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? SelfName : m.UserId.ToString()) : m.Nickname,
-                nickname = string.IsNullOrEmpty(m.Nickname) ? (m.IsSelf ? SelfName : m.UserId.ToString()) : m.Nickname,
+                name = m.IsSelf ? SelfName : (string.IsNullOrEmpty(m.Nickname) ? m.UserId.ToString() : m.Nickname),
+                nickname = m.IsSelf ? SelfName : (string.IsNullOrEmpty(m.Nickname) ? m.UserId.ToString() : m.Nickname),
                 uin = m.UserId.ToString(),
                 content = m.Raw
             }
