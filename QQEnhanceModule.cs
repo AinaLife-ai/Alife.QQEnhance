@@ -42,6 +42,10 @@ public class QQEnhanceConfig
     [Description("开启后撤回请求被接受会推送确认消息；默认关闭=成功静默，只有 delete_msg 直接报错才提示（NapCat 平台不给真实撤回回执，本配置只是接受确认）")]
     public bool RecallConfirmEnabled { get; set; } = false;
 
+    [DisplayName("列表快照有效期(秒)")]
+    [Description("list=true 候选列表序号的有效时间：期间 index 严格按该列表解析，不受新消息影响；过期后自动回退实时解析。0=禁用快照始终实时。默认10秒（Alife响应快通常足够），范围0~600")]
+    public int ListSnapshotSeconds { get; set; } = 10;
+
     [DisplayName("撤回核验延迟(秒)-已废弃")]
     [Description("已废弃：历史接口读NapCat本地库无法核验撤回结果，后台核验已移除，此配置不再生效")]
     public double RecallVerifyDelaySeconds { get; set; } = 1.0;
@@ -718,6 +722,74 @@ public class QQEnhanceModule(
             .FirstOrDefault();
     }
 
+    // ==================== 列表快照（list=true 序号绑定，三功能共用） ====================
+
+    private sealed record ListSnapshot(long ScopeId, bool IsGroup, string Target, DateTime Time, long[] Ids);
+    private ListSnapshot? _listSnapshot;
+
+    private static string NormalizeTarget(string target)
+    {
+        string t = target.Trim();
+        return t is "" or "自己" ? "我" : t;
+    }
+
+    /// <summary>快照是否可用于本次解析：有效期内 + 同target + 同会话（targetId缺省时不限定会话）</summary>
+    private bool SnapshotUsable(ListSnapshot snap, string target, long targetId)
+    {
+        int ttl = Configuration.ListSnapshotSeconds;
+        if (ttl <= 0) return false;
+        if ((DateTime.Now - snap.Time).TotalSeconds > Math.Min(ttl, 600)) return false;
+        if (!string.Equals(snap.Target, NormalizeTarget(target), StringComparison.OrdinalIgnoreCase)) return false;
+        return targetId == 0 || targetId == snap.ScopeId;
+    }
+
+    /// <summary>按 index 解析目标：快照有效则严格按快照序号（不受新消息影响），否则实时解析（跳过已撤回）</summary>
+    private async Task<(LiveMessage? msg, string? error)> ResolveByIndexAsync(string target, long targetId, string messageType, int index)
+    {
+        ListSnapshot? snap = _listSnapshot;
+        if (snap != null && SnapshotUsable(snap, target, targetId))
+        {
+            if (index > snap.Ids.Length)
+                return (null, $"快照候选只有 {snap.Ids.Length} 条，没有第 {index} 条；要看最新请重新 list=true");
+            if (_liveById.TryGetValue(snap.Ids[index - 1], out LiveMessage? sm))
+                return (sm, null);
+            return (null, "快照中该条消息已不在缓存，请重新 list=true 获取候选");
+        }
+        var (msg, _, _, error) = await ResolveTargetMessageAsync(target, targetId, messageType, index, includeRecalled: false);
+        return (msg, error);
+    }
+
+    /// <summary>渲染候选列表并拍快照（撤回/贴表情/引用三功能共用，序号对所有功能一致）</summary>
+    private async Task<string> BuildCandidateListAsync(string target, long targetId, string messageType)
+    {
+        var (msg, isGroup, scopeId, error) = await ResolveTargetMessageAsync(target, targetId, messageType, 1, includeRecalled: true);
+        if (scopeId == 0 && msg == null) return error!;
+        bool g = msg != null ? isGroup : messageType != "private";
+        long sc = msg != null ? scopeId : targetId;
+        string nt = NormalizeTarget(target);
+        bool self = nt == "我";
+        long botId = GetBotId();
+        bool byIdUin = long.TryParse(nt, out long targetUin);
+        var candidates = _liveMessages
+            .Where(m => g ? m.GroupId == sc : (m.GroupId == 0 && m.PeerId == sc))
+            .Where(m => self ? m.IsSelf
+                : byIdUin ? (m.UserId == targetUin || (botId != 0 && targetUin == botId && m.IsSelf))
+                : m.Nickname.Contains(nt, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(m => m.Time).ThenByDescending(m => m.MessageId)
+            .Take(10).ToList();
+        if (candidates.Count == 0) return $"未找到 {target} 的消息记录";
+        _listSnapshot = new ListSnapshot(sc, g, nt, DateTime.Now, candidates.Select(c => c.MessageId).ToArray());
+        int ttl = Math.Clamp(Configuration.ListSnapshotSeconds, 0, 600);
+        var sb = new StringBuilder();
+        sb.AppendLine($"{target} 的最近 {candidates.Count} 条消息（用 index=序号 或真实消息ID 操作；标注【已撤回】的不可再操作。序号在 {ttl} 秒内有效，期间不受新消息影响）：");
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            var c = candidates[i];
+            sb.AppendLine($"{i + 1}. [消息ID:{c.MessageId}]{(c.IsRecalled ? "【已撤回】" : "")} {(c.IsSelf ? SelfName : c.Nickname)}: {FoldText(c.Raw)}");
+        }
+        return sb.ToString();
+    }
+
     /// <summary>定位结果解析：targetId 缺省时自动推断会话；找不到时回拉历史重试一次。
     /// includeRecalled=true 时（仅撤回功能用）候选含已撤回消息，保证与撤回候选列表序号完全一致</summary>
     private async Task<(LiveMessage? msg, bool isGroup, long scopeId, string? error)> ResolveTargetMessageAsync(
@@ -776,14 +848,21 @@ public class QQEnhanceModule(
         [Description("目标用户QQ号或昵称，\"我\"表示自己（messageId 模式下可省略）")] string target = "",
         [Description("表情ID，默认201=点赞；传 0 = 不贴表情，只显示完整表情ID对照表（看完再选）")] int emojiId = 201,
         [Description("贴倒数第几条，默认1=最近一条")] int index = 1,
-        [Description("真实消息ID（可选，传入则直接对该消息贴，忽略 target/index）")] long messageId = 0,
+        [Description("真实消息ID（可选，传入则直接对该消息贴，忽略 target/index/list）")] long messageId = 0,
         [Description("目标群号（可省略，省略时自动推断最近会话）")] long targetId = 0,
-        [Description("消息类型：group或private，可省略")] string messageType = "")
+        [Description("消息类型：group或private，可省略")] string messageType = "",
+        [Description("true=只列出 target 最近10条候选（不贴），看完用 index=序号 或 messageId 贴；不确定贴哪条时才用，默认false直接贴最近一条")] bool list = false)
     {
         if (!Configuration.EmojiReactEnabled) { interactor.Poke("贴表情功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("贴表情", "SendEmojiLike")); return; }
         if (emojiId == 0) { interactor.Poke("QQ表情ID对照（选一个重新调用 SetEmojiRecent 并带上该 emojiId）：" + EmojiIdTable); return; }
         index = Math.Clamp(index, 1, 20);
+
+        if (list)
+        {
+            interactor.Poke(await BuildCandidateListAsync(target, targetId, messageType));
+            return;
+        }
 
         long mid;
         if (messageId != 0)
@@ -793,8 +872,9 @@ public class QQEnhanceModule(
         else
         {
             if (string.IsNullOrWhiteSpace(target)) { interactor.Poke("请传 target（QQ号或昵称）或 messageId（真实消息ID）"); return; }
-            (LiveMessage? msg, _, _, string? error) = await ResolveTargetMessageAsync(target, targetId, messageType, index);
+            (LiveMessage? msg, string? error) = await ResolveByIndexAsync(target, targetId, messageType, index);
             if (msg == null) { interactor.Poke(error!); return; }
+            if (msg.IsRecalled) { interactor.Poke($"第 {index} 条 [消息ID:{msg.MessageId}]已被撤回，不能贴表情，请选其他序号或重新 list=true"); return; }
             mid = msg.MessageId;
         }
 
@@ -853,7 +933,7 @@ public class QQEnhanceModule(
         [Description("消息类型：group或private，可省略")] string messageType = "",
         [Description("撤回倒数第几条：默认1=最近一条，2=倒数第二条，以此类推")] int index = 1,
         [Description("真实消息ID（可选，传入则直接撤该条，忽略 target/index/list）")] long messageId = 0,
-        [Description("true=只列出 target 最近10条候选消息（不撤回），看完用 index 或 messageId 撤")] bool list = false)
+        [Description("true=只列出 target 最近10条候选（不撤回），看完用 index=序号 或 messageId 撤；序号在快照有效期内不受新消息影响")] bool list = false)
     {
         if (!Configuration.DeleteMsgEnabled) { interactor.Poke("撤回功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("撤回", "DeleteMessage")); return; }
@@ -879,54 +959,19 @@ public class QQEnhanceModule(
             return;
         }
 
-        // list 与默认模式都需要先定位 target 的消息（includeRecalled: 候选与列表序号完全一致，含已撤回项）
-        (LiveMessage? msg, bool isGroup, long scopeId, string? error) =
-            await ResolveTargetMessageAsync(target, targetId, messageType, list ? 1 : index, includeRecalled: true);
-
+        // 模式3：出候选列表并拍快照（序号在快照有效期内不受新消息影响）
         if (list)
         {
-            // 模式3：出候选列表（即使精确定位失败也尽量列出来）
-            if (scopeId == 0 && msg == null) { interactor.Poke(error!); return; }
-            bool g = msg != null ? isGroup : messageType != "private";
-            long sc = msg != null ? scopeId : targetId;
-            bool self = target is "我" or "自己";
-            long botId = GetBotId();
-            bool byIdUin = long.TryParse(target, out long targetUin);
-            var candidates = _liveMessages
-                .Where(m => g ? m.GroupId == sc : (m.GroupId == 0 && m.PeerId == sc))
-                .Where(m => self ? m.IsSelf
-                    : byIdUin ? (m.UserId == targetUin || (botId != 0 && targetUin == botId && m.IsSelf))
-                    : m.Nickname.Contains(target, StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(m => m.Time).ThenByDescending(m => m.Seq)
-                .Take(10).ToList();
-            if (candidates.Count == 0)
-            {
-                await BackfillHistoryAsync(g ? sc : 0, g ? 0 : sc, 20);
-                candidates = _liveMessages
-                    .Where(m => g ? m.GroupId == sc : (m.GroupId == 0 && m.PeerId == sc))
-                    .Where(m => self ? m.IsSelf
-                        : byIdUin ? (m.UserId == targetUin || (botId != 0 && targetUin == botId && m.IsSelf))
-                        : m.Nickname.Contains(target, StringComparison.OrdinalIgnoreCase))
-                    .OrderByDescending(m => m.Time).ThenByDescending(m => m.Seq)
-                    .Take(10).ToList();
-            }
-            if (candidates.Count == 0) { interactor.Poke($"未找到 {target} 的消息记录"); return; }
-            var sb2 = new StringBuilder();
-            sb2.AppendLine($"{target} 的最近 {candidates.Count} 条消息（撤回用：DeleteMsgRecent index=序号 或 messageId=消息ID；标注【已撤回】的不能再撤）：");
-            for (int i = 0; i < candidates.Count; i++)
-            {
-                var c = candidates[i];
-                sb2.AppendLine($"{i + 1}. [消息ID:{c.MessageId}]{(c.IsRecalled ? "【已撤回】" : "")} {(c.IsSelf ? SelfName : c.Nickname)}: {FoldText(c.Raw)}");
-            }
-            interactor.Poke(sb2.ToString());
+            interactor.Poke(await BuildCandidateListAsync(target, targetId, messageType));
             return;
         }
 
-        // 模式1：撤倒数第 index 条
+        // 模式1：撤倒数第 index 条（快照有效则按快照序号；否则实时解析，自动跳过已撤回，支持连撤）
+        (LiveMessage? msg, string? error) = await ResolveByIndexAsync(target, targetId, messageType, index);
         if (msg == null) { interactor.Poke(error!); return; }
         if (msg.IsRecalled)
         {
-            interactor.Poke($"第 {index} 条 [消息ID:{msg.MessageId}]已经是撤回状态（列表中标注【已撤回】），无需再撤。要撤别的请用 list=true 看候选列表");
+            interactor.Poke($"第 {index} 条 [消息ID:{msg.MessageId}]已经是撤回状态（列表中标注【已撤回】），无需再撤。要撤别的请用快照内其他序号，或重新 list=true 看最新候选");
             return;
         }
         if (!msg.IsSelf && msg.GroupId == 0)
@@ -946,15 +991,6 @@ public class QQEnhanceModule(
         _liveById.TryGetValue(mid, out LiveMessage? known);
         string preview = known != null
             ? $" {(known.IsSelf ? SelfName : known.Nickname)}: {FoldText(known.Raw)}" : "";
-
-        // 自己的消息超约2分钟是平台硬时限，必然失败——直接如实拒绝，避免 NapCat 假成功误导
-        if (known is { IsSelf: true } &&
-            DateTimeOffset.UtcNow.ToUnixTimeSeconds() - known.Time > 115)
-        {
-            long ageMin = (DateTimeOffset.UtcNow.ToUnixTimeSeconds() - known.Time) / 60;
-            interactor.Poke($"[消息ID:{mid}]{preview} 发送于约 {ageMin} 分钟前，已超过约2分钟撤回时限（平台硬限制，任何方式都撤不掉），未执行撤回。不要再尝试撤这条");
-            return;
-        }
 
         string? err = await CallActionSafeAsync("delete_msg", new { message_id = mid }, "撤回", client);
         if (err != null)
@@ -1086,11 +1122,18 @@ public class QQEnhanceModule(
         [Description("引用倒数第几条，默认1=最近一条")] int index = 1,
         [Description("被回复消息的真实ID（可选，传入则直接引用该条，忽略 target/index）")] long replyToId = 0,
         [Description("目标群号或对方QQ（可省略，省略时自动推断该用户最近发言所在会话）")] long targetId = 0,
-        [Description("消息类型：group或private，可省略")] string messageType = "")
+        [Description("消息类型：group或private，可省略")] string messageType = "",
+        [Description("true=只列出 target 最近10条候选（不引用），看完用 index=序号 或 replyToId 引用；不确定引哪条时才用，默认false直接引用最近一条")] bool list = false)
     {
         if (!Configuration.ReplyEnabled) { interactor.Poke("引用回复功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("引用回复", "SendReplyMessage")); return; }
         index = Math.Clamp(index, 1, 20);
+
+        if (list)
+        {
+            interactor.Poke(await BuildCandidateListAsync(target, targetId, messageType));
+            return;
+        }
 
         long mid; bool isGroup; long scopeId;
         if (replyToId != 0)
@@ -1115,9 +1158,10 @@ public class QQEnhanceModule(
         else
         {
             if (string.IsNullOrWhiteSpace(target)) { interactor.Poke("请传 target（QQ号或昵称）或 replyToId（真实消息ID）"); return; }
-            (LiveMessage? msg, bool g, long sc, string? error) = await ResolveTargetMessageAsync(target, targetId, messageType, index);
+            (LiveMessage? msg, string? error) = await ResolveByIndexAsync(target, targetId, messageType, index);
             if (msg == null) { interactor.Poke(error!); return; }
-            mid = msg.MessageId; isGroup = g; scopeId = sc;
+            if (msg.IsRecalled) { interactor.Poke($"第 {index} 条 [消息ID:{msg.MessageId}]已被撤回，不能引用，请选其他序号或重新 list=true"); return; }
+            mid = msg.MessageId; isGroup = msg.GroupId != 0; scopeId = isGroup ? msg.GroupId : msg.PeerId;
         }
 
         string? result = await SendReplyCoreAsync(isGroup, scopeId, mid, message);
