@@ -39,11 +39,11 @@ public class QQEnhanceConfig
     public bool DeleteMsgEnabled { get; set; } = true;
 
     [DisplayName("撤回成功回执")]
-    [Description("开启后撤回成功会推送确认消息；默认关闭=成功静默，撤回请求被接受后立即返回，后台自动核验结果，只有确认失败（或核验异常）才报错")]
+    [Description("开启后撤回请求被接受会推送确认消息；默认关闭=成功静默，只有 delete_msg 直接报错才提示（NapCat 平台不给真实撤回回执，本配置只是接受确认）")]
     public bool RecallConfirmEnabled { get; set; } = false;
 
-    [DisplayName("撤回核验延迟(秒)")]
-    [Description("撤回后等待多久开始拉历史核验结果（QQ服务器同步需要一点时间），默认1秒；若首次核验消息仍在，会在再等1.5秒后复查一次才报失败")]
+    [DisplayName("撤回核验延迟(秒)-已废弃")]
+    [Description("已废弃：历史接口读NapCat本地库无法核验撤回结果，后台核验已移除，此配置不再生效")]
     public double RecallVerifyDelaySeconds { get; set; } = 1.0;
 
     [DisplayName("禁言")]
@@ -314,7 +314,6 @@ public class QQEnhanceModule(
     // 本插件不依赖任何事件上报——撤回后经历史记录比对核验，确认成功的在此登记
     /// <summary>已确认撤回的消息ID（mid -> 撤回unix秒），用于缓存存档标记与列表标注</summary>
     private readonly ConcurrentDictionary<long, long> _recalledIds = new();
-    private readonly ConcurrentDictionary<long, byte> _recallVerifying = new();
 
     /// <summary>登记一条已撤回消息：保留在缓存中作存档但打上标记（列表标注【已撤回】），定时修剪</summary>
     private void MarkRecalled(long mid)
@@ -561,19 +560,15 @@ public class QQEnhanceModule(
         string explanation = yuYangActive
             ? """
                 使用规则：
-                - 已检测到 YuYang.QQTools（幼央工具箱）接管：戳一戳、引用回复、点赞、贴表情、撤回、输入中 请调用幼央的函数。
-                - 本插件负责：禁言(GroupBan)、音乐卡片(SendMusicCard)、合并转发(ForwardRecent/SendForwardById/SendForwardNew)、消息ID查询(QGetMessages)、戳回决策(PokeBack)、感知通知。
-                - QQ消息ID通常是负数（如 -1976879391），编造或猜ID必然失败；要操作某条消息先用 QGetMessages 获取真实ID。
+                - 已检测到 YuYang.QQTools（幼央工具箱）接管：戳一戳、引用回复、点赞、贴表情、撤回、输入中 请调用幼央的函数；本插件负责：禁言(GroupBan)、音乐卡片(SendMusicCard)、合并转发(ForwardRecent/SendForwardById/SendForwardNew)、消息ID查询(QGetMessages)、戳回决策(PokeBack)、感知通知。
+                - QQ消息ID通常是负数，编造必败；要操作某条消息先用 QGetMessages 获取真实ID。
                 """
             : """
                 使用规则：
-                - QQ消息ID通常是负数，禁止编造。三个消息操作函数均为双模式：撤回 DeleteMsgRecent、贴表情 SetEmojiRecent、引用 ReplyRecent——默认按 target（QQ号/昵称）+index（倒数第N条）一步到位，无需先查ID；已知真实ID时也可直接传 messageId/replyToId 操作指定消息（ID必须来自 QGetMessages 或 DeleteMsgRecent list=true 列表）。
-                - DeleteMsgRecent list=true 可列出目标最近10条候选（序号+消息ID+折叠内容），看完用 index 或 messageId 撤。
-                - 转发最近N条用 ForwardRecent（自动含bot自己的消息，真实昵称）。
-                - 音乐卡片：SendMusicCard platform=search musicId=歌名 即可。发送可能较慢，超时后先用 QGetMessages 确认，不要重复发送。
-                - 用本插件发送类函数（引用回复/合并转发/音乐卡片）成功后就已完成发送，不要再用 QChat 发重复确认消息。
-                - 戳一戳：PokeGroupMember 群聊戳；PokePrivateMember 私聊戳；被戳后系统会提示，用 PokeBack 回戳或忽略。
-                - 贴表情 emojiId 对照（QQ官方表情列表，按需取用，不要每次都贴同一个）：201=点赞 264=捂脸 182=笑哭 271=吃瓜 270=emm 179=doge 269=暗中观察 273=我酸了 272=呵呵哒 222=抱抱 227=拍手 246=加油抱抱 116=示爱 122=爱你 214=啵啵 219=蹭一蹭 111=可怜 106=委屈 173=泪奔 262=脑阔疼 268=问号脸 265=辣眼睛 266=哦哟 267=头秃 277=汪汪 278=汗 281=无眼笑 282=敬礼 284=面无表情 285=摸鱼 287=哦 289=睁眼 104=哈欠 109=左亲亲 118=抱拳 120=拳头 123=NO 124=OK 125=转圈 129=挥手 144=喝彩 147=棒棒糖 171=茶 174=无奈 175=卖萌 176=小纠结 180=惊喜 181=骚扰 183=我最美 203=托脸 212=托腮 232=佛系 240=喷脸 243=甩头
+                - 消息ID禁止编造，必须来自 QGetMessages 或 DeleteMsgRecent list=true 列表；贴表情/引用/撤回默认 target+index 一步到位，无需先查ID。
+                - 发送类函数（引用回复/合并转发/音乐卡片）成功即已完成发送，不要再用 QChat 发重复确认；音乐卡片发送较慢，超时先 QGetMessages 确认再决定是否重发。
+                - 被戳后系统会提示，用 PokeBack 回戳或忽略。
+                - 贴表情 emojiId 常用：201=点赞 264=捂脸 182=笑哭 271=吃瓜 179=doge 268=问号脸；完整对照表用 SetEmojiRecent emojiId=0 查看，按需取用别总用同一个。
                 """;
 
         XmlHandler xmlHandler = new(this) {
@@ -771,11 +766,15 @@ public class QQEnhanceModule(
 
     // ==================== 工具函数 ====================
 
+    /// <summary>QQ官方表情ID完整对照表（SetEmojiRecent emojiId=0 查询用，不占常驻文档）</summary>
+    private const string EmojiIdTable =
+        "201=点赞 264=捂脸 182=笑哭 271=吃瓜 270=emm 179=doge 269=暗中观察 273=我酸了 272=呵呵哒 222=抱抱 227=拍手 246=加油抱抱 116=示爱 122=爱你 214=啵啵 219=蹭一蹭 111=可怜 106=委屈 173=泪奔 262=脑阔疼 268=问号脸 265=辣眼睛 266=哦哟 267=头秃 277=汪汪 278=汗 281=无眼笑 282=敬礼 284=面无表情 285=摸鱼 287=哦 289=睁眼 104=哈欠 109=左亲亲 118=抱拳 120=拳头 123=NO 124=OK 125=转圈 129=挥手 144=喝彩 147=棒棒糖 171=茶 174=无奈 175=卖萌 176=小纠结 180=惊喜 181=骚扰 183=我最美 203=托脸 212=托腮 232=佛系 240=喷脸 243=甩头";
+
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("给QQ消息贴表情回应（一步到位，无需先查ID）。看到有趣/赞同/暖心/好笑的消息随手贴一个（201=点赞 264=捂脸 182=笑哭，更多表情ID见文档），这是真人最轻量的互动方式，不需要说话就可以直接贴。两种用法：1) 默认贴 target 的最近一条（index 可指定倒数第N条）；2) 已知真实消息ID时直接传 messageId（必须来自 QGetMessages 或撤回列表，严禁编造）")]
+    [Description("给QQ消息贴表情回应（一步到位，无需先查ID）。看到有趣/赞同/暖心/好笑的消息随手贴一个（常用：201=点赞 264=捂脸 182=笑哭 271=吃瓜 270=emm 179=doge 269=暗中观察 273=我酸了 272=呵呵哒 222=抱抱 227=拍手 246=加油抱抱 116=示爱 122=爱你 214=啵啵 219=蹭一蹭 111=可怜 106=委屈 173=泪奔 262=脑阔疼 268=问号脸 265=辣眼睛，更多可传 emojiId=0 查看完整对照表再选），这是真人最轻量的互动方式，不需要说话就可以直接贴。两种用法：1) 默认贴 target 的最近一条（index 可指定倒数第N条）；2) 已知真实消息ID时直接传 messageId（必须来自 QGetMessages 或撤回列表，严禁编造）")]
     public async Task SetEmojiRecent(
         [Description("目标用户QQ号或昵称，\"我\"表示自己（messageId 模式下可省略）")] string target = "",
-        [Description("表情ID，201为点赞")] int emojiId = 201,
+        [Description("表情ID，默认201=点赞；传 0 = 不贴表情，只显示完整表情ID对照表（看完再选）")] int emojiId = 201,
         [Description("贴倒数第几条，默认1=最近一条")] int index = 1,
         [Description("真实消息ID（可选，传入则直接对该消息贴，忽略 target/index）")] long messageId = 0,
         [Description("目标群号（可省略，省略时自动推断最近会话）")] long targetId = 0,
@@ -783,6 +782,7 @@ public class QQEnhanceModule(
     {
         if (!Configuration.EmojiReactEnabled) { interactor.Poke("贴表情功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("贴表情", "SendEmojiLike")); return; }
+        if (emojiId == 0) { interactor.Poke("QQ表情ID对照（选一个重新调用 SetEmojiRecent 并带上该 emojiId）：" + EmojiIdTable); return; }
         index = Math.Clamp(index, 1, 20);
 
         long mid;
@@ -937,8 +937,9 @@ public class QQEnhanceModule(
         await RecallByIdAsync(msg.MessageId);
     }
 
-    /// <summary>按真实ID撤回并回执（含折叠内容摘要）。NapCat 可能对实际失败的 delete_msg 也返回成功回包，
-    /// 且本插件不依赖任何事件上报——撤回后重新拉历史核验：消息从历史中消失=真撤回，还在=明确失败，绝不谎报</summary>
+    /// <summary>按真实ID撤回并回执（含折叠内容摘要）。说明：NapCat 可能对实际失败的 delete_msg 也返回成功回包，
+    /// 但历史接口读的是NapCat本地库（撤回后本地记录不删），无法作为核验依据，故不做结果核验——
+    /// 真实ID+115秒预拒已保证自己的消息撤回必然成功；delete_msg 报错时如实回报</summary>
     private async Task RecallByIdAsync(long mid)
     {
         OneBotClient? client = GetClient();
@@ -962,83 +963,10 @@ public class QQEnhanceModule(
             return;
         }
 
-        // 后台核验：撤回请求被接受后立即返回（成功静默），核验在后台进行，只有确认失败/核验异常才报错
-        bool canVerify = known != null && (known.GroupId != 0 || known.PeerId != 0) &&
-            DateTimeOffset.UtcNow.ToUnixTimeSeconds() - known.Time < 110;
-        if (!canVerify)
-        {
-            if (Configuration.RecallConfirmEnabled)
-                interactor.Poke($"撤回请求已发送并被 NapCat 接受 [消息ID:{mid}]{preview}（该消息不在缓存或太旧，无法自动核验；可用 QGetMessages 核实结果）");
-            return;
-        }
-        if (_recallVerifying.TryAdd(mid, 0))
-            _ = VerifyRecallInBackgroundAsync(mid, preview, known!);
-    }
-
-    /// <summary>后台撤回核验：拉历史比对，消息消失=真撤回（成功默认静默），仍在=报错，核验异常=报错。
-    /// 两段式：配置延迟后先查一次；仍在则再等1.5秒复查，避免QQ同步延迟误判失败</summary>
-    private async Task VerifyRecallInBackgroundAsync(long mid, string preview, LiveMessage known)
-    {
-        try
-        {
-            await Task.Delay(TimeSpan.FromSeconds(Math.Clamp(Configuration.RecallVerifyDelaySeconds, 0.2, 30)));
-            bool? gone = await CheckGoneFromHistoryAsync(mid, known);
-            if (gone == false)
-            {
-                await Task.Delay(1500);
-                gone = await CheckGoneFromHistoryAsync(mid, known);
-            }
-            if (gone == true)
-            {
-                MarkRecalled(mid);
-                if (Configuration.RecallConfirmEnabled)
-                    interactor.Poke($"已撤回 [消息ID:{mid}]{preview}（已核验历史记录，消息确实消失）。撤回已完成，无需再确认");
-            }
-            else if (gone == false)
-            {
-                interactor.Poke($"撤回失败：[消息ID:{mid}]{preview} 并未真正撤回（历史核验消息仍在）。最常见原因是消息已超过约2分钟撤回时限（平台限制，无法补救），或非管理员撤他人消息。不要再重复撤回这条");
-            }
-            else
-            {
-                interactor.Poke($"撤回结果核验异常：[消息ID:{mid}]{preview} 历史核验请求失败，无法确认撤回结果；可用 QGetMessages 核实");
-            }
-        }
-        catch (Exception e)
-        {
-            logger.LogDebug(e, "后台撤回核验异常 mid={Mid}", mid);
-        }
-        finally
-        {
-            _recallVerifying.TryRemove(mid, out _);
-        }
-    }
-
-    /// <summary>核验消息是否已从历史记录消失（撤回成功的唯一可靠判据，不依赖任何事件上报）。
-    /// true=已消失（撤回成功），false=仍在（撤回失败），null=核验不了</summary>
-    private async Task<bool?> CheckGoneFromHistoryAsync(long mid, LiveMessage known)
-    {
-        OneBotClient? client = GetClient();
-        if (client == null) return null;
-        try
-        {
-            JsonElement data = known.GroupId != 0
-                ? await client.CallActionAsync<JsonElement>("get_group_msg_history",
-                    new { group_id = known.GroupId, count = 50 })
-                : await client.CallActionAsync<JsonElement>("get_friend_msg_history",
-                    new { user_id = known.PeerId, count = 50 });
-            if (data.ValueKind != JsonValueKind.Object ||
-                !data.TryGetProperty("messages", out var msgs) ||
-                msgs.ValueKind != JsonValueKind.Array)
-                return null;
-            foreach (JsonElement m in msgs.EnumerateArray())
-                if (ReadPropLong(m, "message_id") == mid) return false;
-            return true;
-        }
-        catch (Exception e)
-        {
-            logger.LogDebug(e, "撤回结果历史核验失败 mid={Mid}", mid);
-            return null;
-        }
+        // 撤回请求被接受：乐观标记已撤回存档（真实新鲜ID下自己的消息撤回几乎必然成功），成功默认静默
+        MarkRecalled(mid);
+        if (Configuration.RecallConfirmEnabled)
+            interactor.Poke($"撤回请求已被 NapCat 接受 [消息ID:{mid}]{preview}。撤回已完成，无需再确认（平台无真实回执，超时/无权限等极少数情况可能实际未撤回）");
     }
 
     [XmlFunction(FunctionMode.OneShot)]
