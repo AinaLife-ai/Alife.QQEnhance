@@ -13,7 +13,7 @@ QQ增强插件：贴表情、点赞、撤回、禁言、戳一戳、引用回复
 - **戳一戳**：`PokeGroupMember` 群聊 / `PokePrivateMember` 私聊 / `PokeBack` 被戳后回戳（冷却可配置，默认10秒防刷屏）
 - **引用回复**：`ReplyRecent`——双模式：默认引用某人最近一条（targetId 可省略自动推断会话）；也可直接传真实 replyToId 引用指定消息。旧 `SendReplyMessage` 已并入删除
 - **合并转发**：`ForwardRecent`（转发最近N条，免ID，缓存不足自动回拉历史补齐。混合节点：文本/图片/语音/视频/表情走完整CQ码内容节点原样重发；文件/嵌套转发/引用/卡片/音乐走真实消息ID节点结构完整保留；含 bot 自己发的消息且显示真实QQ昵称）+ `SendForwardById` + `SendForwardNew`（均支持群聊/私聊）
-- **点歌/音乐卡片**：`SendMusicCard platform=search musicId=歌名`，默认发**网易云官方卡片**（结构化 music 消息段，免签名，任何 QQ 版本可正常显示播放，不会"版本过低"）
+- **点歌/音乐卡片**：`SendMusicCard platform=search musicId=歌名`，默认发**网易云官方卡片**（163原生 music 消息段，与 KiraAI 版 QQ增强 完全同逻辑：ID 原样透传、send_msg 路由、NapCat 本地渲染签名）
 - **感知通知**：被禁言/解禁、新成员进群、被戳（决策提示）、被赞资料卡（可回赞）、群消息被贴表情
 - **消息ID查询**：`QGetMessages`（纯查询工具，含防抖：同会话15秒内超2次拒绝），实时捕获 + 历史回拉双来源，含 bot 自己发的消息
 - **私聊输入中状态**
@@ -63,9 +63,19 @@ QQ 消息 ID 为负数，撤回/贴表情/引用/转发必须使用真实 ID。�
 - 本插件通过反射访问 `QChatService` 内部的 `OneBotClient`，不修改官方代码
 - **QQ平台消息ID为负数**。操作指定消息必须使用 `QGetMessages` 返回的真实ID，严禁编造
 - 引用回复使用结构化消息段 `{type:"reply",data:{id}}`（NapCat 原生支持；`send_msg` 没有顶层 reply 参数）
-- **音乐卡片**：默认网易云官方卡片（music 消息段 type=163），免签名全端可渲染；配置"音乐卡片样式=custom"为高级选项，需 NapCat 配置 musicSignUrl，否则接收方显示"发送者版本过低"
+- **音乐卡片**：默认网易云官方卡片（music 消息段 type=163，KiraAI 同款逻辑），由 NapCat 本地渲染签名；"音乐卡片样式=custom"为免签名自定义音乐段（字段本地渲染）；样式=record 为直链语音条保底。若 163 卡片显示"发送者版本过低"，说明 NapCat 签名通道异常，可切换 custom/record
 - 撤回合并转发卡片类消息会失败（NapCat 平台限制）
 - 实时消息捕获参考了 [YuYang.QQTools](https://github.com/3026838203/YuYang.QQTools) 的 WebSocket 监听思路，特此致谢
+
+## v4.9.15 更新说明
+
+- **音乐卡片完全复刻 KiraAI 版逻辑（修复"发送者版本过低"）**：
+  - 平台ID原样透传零加工：`platform=163/qq/kugou/migu/kuwo` 时 musicId 不做任何处理直接进 music 消息段（此前存在多余加工路径）
+  - 发送动作统一为 `send_msg`（与 KiraAI 逐字节一致），群聊/私聊由 `DetectIsGroupAsync` 自动判定，不再依赖调用方传对 messageType
+  - 搜索源收紧为**网易云官方 web 搜索单一来源**（砍掉 163api/meting 可疑兜底源，避免拿到无效ID导致卡片渲染失败）
+  - `json` 样式已废弃（依赖的公共签名服务已关停）：旧配置为 json 会自动按 163 发送并输出警告日志提示改配置
+  - `custom` 免签名卡字段修正：补充 content+singer 双字段兼容（部分客户端只认其一），audio 缺失时自动补网易云 outer 外链兜底
+  - 新增发送 payload 诊断日志（`音乐卡片发送 payload: ...`），出问题可直接比对 NapCat 日志定位
 
 ## v4.9.14 更新说明
 

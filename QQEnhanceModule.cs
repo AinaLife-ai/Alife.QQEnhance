@@ -59,7 +59,7 @@ public class QQEnhanceConfig
     public bool MusicCardEnabled { get; set; } = true;
 
     [DisplayName("音乐卡片样式")]
-    [Description("163=网易云卡片（需签名服务，见下）；record=直接发语音条（网易云直链，完全不依赖签名，任何端可播，卡片异常时的保底）；json=QQ分享卡片；custom=自定义音乐段。除record外所有卡片都必须经过签名服务，签名服务异常或卡片版本过期时接收方会显示\"发送者版本过低\"")]
+    [Description("163=网易云官方卡片（NapCat本地渲染，与KiraAI同逻辑，推荐）；custom=自定义音乐段（免签名，字段本地渲染）；record=直接发语音条（网易云直链保底，任何端可播）；json=已废弃（依赖的公共签名服务已关停），配置为json会自动按163发送")]
     public string MusicCardStyle { get; set; } = "163";
 
     [DisplayName("音乐签名服务地址")]
@@ -1444,65 +1444,61 @@ public class QQEnhanceModule(
         s.Replace("&", "&amp;").Replace("[", "&#91;").Replace("]", "&#93;").Replace(",", "&#44;");
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("发送音乐到QQ聊天（点歌）。platform=search musicId=歌名关键词（如 晴天 周杰伦）即可，默认发网易云卡片。若接收方显示\"发送者版本过低\"，说明签名服务不可用或卡片版本过期——可在插件配置填 音乐签名服务地址，或把 音乐卡片样式 改为 record（直接发语音条，任何端可播，100%不受签名影响）。旧用法 platform=163 + 网易云歌曲ID 也可。⚠发送可能较慢（>10秒），超时后请先用 QGetMessages 确认，不要重复发送")]
+    [Description("发送音乐到QQ聊天（点歌）。platform=search musicId=歌名关键词（如 晴天 周杰伦）即可，默认发网易云官方卡片（163原生段，与KiraAI版逐字节一致）。platform=163/qq/kugou/migu/kuwo 时 musicId 为该平台原生ID并原样透传（qq等平台依赖NapCat签名服务，公共签名已失效，失败请改用search）。接收方显示\"发送者版本过低\"=该平台签名通道失效，可在插件配置填 音乐签名服务地址，或把 音乐卡片样式 改为 record（直接发语音条，100%不受签名影响）。⚠发送可能较慢（约10秒），超时后请先用 QGetMessages 确认，不要重复发送")]
     public async Task SendMusicCard(
         [Description("目标群号或对方QQ")] long targetId,
-        [Description("消息类型：private或group")] string type,
-        [Description("音乐平台：search=关键词搜索（推荐）/163=网易云歌曲ID")] string platform,
-        [Description("歌曲关键词（platform=search时）或网易云歌曲ID（platform=163时）")] string musicId)
+        [Description("消息类型：private或group，可省略，省略时自动判定")] string type = "",
+        [Description("音乐平台：search=关键词搜索网易云（推荐）/163=网易云歌曲ID/qq/kugou/migu/kuwo=对应平台原生ID")] string platform = "search",
+        [Description("歌曲关键词（platform=search时）或平台音乐ID（其他platform时原样透传，不做任何转换）")] string musicId = "")
     {
         if (!Configuration.MusicCardEnabled) { interactor.Poke("音乐卡片功能已禁用"); return; }
         OneBotClient? client = GetClient();
         if (client == null) { interactor.Poke("音乐卡片发送失败：QQ客户端不可用"); return; }
         if (targetId == 0) { interactor.Poke("targetId不能为0"); return; }
+        if (string.IsNullOrWhiteSpace(musicId)) { interactor.Poke("请传 musicId（歌名关键词或平台音乐ID）"); return; }
 
-        bool isGroup = type == "group";
+        bool isGroup = await DetectIsGroupAsync(targetId, type);
+
+        // 配置自愈：json样式依赖的结构卡必须签名，公共签名已关停——旧配置自动按163处理
+        string style = Configuration.MusicCardStyle;
+        if (style == "json")
+        {
+            logger.LogWarning("音乐卡片样式 json 依赖的签名服务已失效，本次自动按 163 发送；建议在插件配置中把样式改为 163");
+            style = "163";
+        }
+
         try
         {
-            // 1. 解析出网易云歌曲ID
-            long ncmId = 0;
-            if (platform == "163" && long.TryParse(musicId.Trim(), out long directId))
+            object message;
+
+            if (style is "record" or "custom")
             {
-                ncmId = directId;
-            }
-            else
-            {
-                ncmId = await SearchNetEaseIdAsync(musicId);
+                // 这两种样式需要网易云歌曲ID（search则先搜）
+                long ncmId = await ResolveNcmIdAsync(platform, musicId);
                 if (ncmId == 0)
                 {
                     interactor.Poke($"未找到歌曲：{musicId}（换个关键词试试，如加上歌手名）");
                     return;
                 }
-            }
-
-            // 2. 构造消息
-            object message;
-            switch (Configuration.MusicCardStyle)
-            {
-                case "record":
+                if (style == "record")
                 {
                     // 保底：直接发语音条（网易云直链，NapCat 自行下载转码，完全不依赖签名，任何端可播）
                     string? playUrl = await ResolveNcmUrlAsync(ncmId);
                     if (string.IsNullOrEmpty(playUrl))
                     {
-                        interactor.Poke("语音条模式需要可用的音乐直链，当前解析失败，请稍后再试或改用 163 卡片样式");
+                        interactor.Poke("语音条模式需要可用的音乐直链，当前解析失败，请稍后再试或改用默认 163 卡片样式");
                         return;
                     }
                     message = new object[] {
                         new { type = "record", data = new { file = playUrl } }
                     };
-                    break;
                 }
-                case "custom":
+                else
                 {
-                    // custom 自定义音乐段。NapCat 要求 url+image 必填，否则直接丢弃；
-                    // 最终仍走签名服务（与163同一通道），账号被风控时同样会显示"版本过低"
+                    // custom 自定义音乐段：NapCat 本地拼卡不经签名服务；audio 解析失败时用官方 outer 外链兜底
                     string? playUrl = await ResolveNcmUrlAsync(ncmId);
                     if (string.IsNullOrEmpty(playUrl))
-                    {
-                        interactor.Poke("custom 样式需要可用的音乐直链，当前解析失败。建议改用默认的 163 卡片样式，或 record 语音条样式");
-                        return;
-                    }
+                        playUrl = $"https://music.163.com/song/media/outer/url?id={ncmId}.mp3";
                     var (songTitle, songArtist, songCover) = await GetNcmSongDetailAsync(ncmId);
                     message = new object[] {
                         new { type = "music", data = new {
@@ -1511,56 +1507,59 @@ public class QQEnhanceModule(
                             audio = playUrl,
                             title = songTitle,
                             content = songArtist,
+                            singer = songArtist,
                             image = songCover
                         } }
                     };
-                    break;
-                }
-                case "json":
-                {
-                    // QQ 分享卡片（com.tencent.structmsg），未配置签名时可能显示"发送者版本过低"
-                    message = BuildJsonMusicCq(musicId, ncmId);
-                    break;
-                }
-                default:
-                {
-                    // 默认：网易云卡片。真相：NapCat 对一切 music 段（含163）都强制走签名服务
-                    // （musicSignUrl，缺省用 ss.xingzhige.com 公共签名），签名服务异常或卡片版本
-                    // 过期时接收方就显示"发送者版本过低"。这里若用户配置了插件侧签名地址，
-                    // 就由插件直接签名拿到卡片JSON、以json段发送，绕开 NapCat 的配置。
-                    string signUrl = Configuration.MusicSignUrl?.Trim() ?? "";
-                    if (signUrl.Length > 0)
-                    {
-                        string signedJson = await SignMusicCardAsync(signUrl, "163", ncmId.ToString());
-                        if (signedJson != null)
-                        {
-                            // 与 NapCat 内部做法一致：签名结果作为 json 消息段直接发送
-                            message = new object[] {
-                                new { type = "json", data = new { data = signedJson } }
-                            };
-                            break;
-                        }
-                        interactor.Poke($"插件侧签名服务 {signUrl} 请求失败，回退交给 NapCat 处理");
-                    }
-                    message = new object[] {
-                        new { type = "music", data = new { type = "163", id = ncmId.ToString() } }
-                    };
-                    break;
                 }
             }
+            else
+            {
+                // 163/平台原生卡片：完全复刻 KiraAI 逻辑——插件侧可选签名，否则原样透传
+                string platformType = platform == "search" ? "163" : platform.Trim();
+                string cardId;
+                if (platform == "search")
+                {
+                    long ncmId = await SearchNetEaseIdAsync(musicId);
+                    if (ncmId == 0)
+                    {
+                        interactor.Poke($"未找到歌曲：{musicId}（换个关键词试试，如加上歌手名）");
+                        return;
+                    }
+                    cardId = ncmId.ToString();
+                }
+                else
+                {
+                    cardId = musicId.Trim(); // KiraAI 行为：ID 原样透传，零加工
+                }
 
-            // 3. 发送
-            SendResult? sent = isGroup
-                ? await client.CallActionAsync<SendResult>("send_group_msg", new { group_id = targetId, message })
-                : await client.CallActionAsync<SendResult>("send_private_msg", new { user_id = targetId, message });
+                string signUrl = Configuration.MusicSignUrl?.Trim() ?? "";
+                string? signedJson = null;
+                if (signUrl.Length > 0)
+                {
+                    signedJson = await SignMusicCardAsync(signUrl, platformType, cardId);
+                    if (signedJson == null)
+                        logger.LogWarning("插件侧签名服务 {SignUrl} 请求失败，回退为原生 music 段交给 NapCat 处理", signUrl);
+                }
+                message = signedJson != null
+                    ? new object[] { new { type = "json", data = new { data = signedJson } } }
+                    : new object[] { new { type = "music", data = new { type = platformType, id = cardId } } };
+            }
+
+            // 发送：与 KiraAI 完全一致——send_msg，群/私聊由 group_id/user_id 参数推断
+            object sendParams = isGroup
+                ? new { group_id = targetId, message }
+                : new { user_id = targetId, message };
+            logger.LogInformation("音乐卡片发送 payload: {Payload}", JsonSerializer.Serialize(sendParams));
+            SendResult? sent = await client.CallActionAsync<SendResult>("send_msg", sendParams);
             long sentId = ExtractSentId(sent);
             if (sentId != 0)
-                RecordSentMessage(sentId, isGroup ? targetId : 0, isGroup ? 0 : targetId, $"[音乐 网易云:{ncmId}]");
+                RecordSentMessage(sentId, isGroup ? targetId : 0, isGroup ? 0 : targetId, $"[音乐 {platform}:{musicId}]");
             // 成功静默：不触发AI新一轮确认回复
         }
         catch (TaskCanceledException)
         {
-            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。服务器可能仍在后台处理，卡片可能稍后出现；请用 QGetMessages 确认，不要重复发送");
+            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。NapCat签名较慢时可能仍在后台处理，卡片可能稍后出现；请用 QGetMessages 确认，不要重复发送");
         }
         catch (Exception e)
         {
@@ -1568,7 +1567,17 @@ public class QQEnhanceModule(
         }
     }
 
-    /// <summary>关键词 → 网易云歌曲ID（官方web搜索 → 163api → meting 兜底）</summary>
+    /// <summary>解析网易云歌曲ID：platform=163且为数字时直用，否则按关键词搜索</summary>
+    private static async Task<long> ResolveNcmIdAsync(string platform, string musicId)
+    {
+        if (platform == "163" && long.TryParse(musicId.Trim(), out long directId))
+            return directId;
+        if (long.TryParse(musicId.Trim(), out long numeric) && platform == "search")
+            return numeric;
+        return await SearchNetEaseIdAsync(musicId);
+    }
+
+    /// <summary>关键词 → 网易云歌曲ID（仅网易云官方 web 搜索，与 KiraAI 同链路，避免可疑ID来源）</summary>
     /// <summary>请求音乐签名服务（与 NapCat 同一协议：POST {type,id}，返回卡片JSON字符串）。失败返回null</summary>
     private static async Task<string?> SignMusicCardAsync(string signUrl, string type, string id)
     {
@@ -1645,86 +1654,9 @@ public class QQEnhanceModule(
         }
         catch { }
 
-        // 2. 163api（NCM-Downloader 同款搜索源）
-        try
-        {
-            string url = "https://163api.qijieya.cn/search?keywords=" + Uri.EscapeDataString(keyword);
-            using var resp = await _http.GetAsync(url);
-            if (resp.IsSuccessStatusCode)
-            {
-                using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-                if (doc.RootElement.TryGetProperty("result", out var result) &&
-                    result.TryGetProperty("songs", out var songs) &&
-                    songs.GetArrayLength() > 0)
-                    return songs[0].GetProperty("id").GetInt64();
-            }
-        }
-        catch { }
-
-        // 3. meting 搜索兜底（从 url 字段解析 id）
-        try
-        {
-            string url = "https://api.qijieya.cn/meting/?type=search&id=" + Uri.EscapeDataString(keyword) + "&limit=1";
-            using var resp = await _http.GetAsync(url);
-            if (resp.IsSuccessStatusCode)
-            {
-                using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-                if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
-                {
-                    string urlField = doc.RootElement[0].TryGetProperty("url", out var uf) ? uf.GetString() ?? "" : "";
-                    var m = Regex.Match(urlField, @"id=(\d+)");
-                    if (m.Success && long.TryParse(m.Groups[1].Value, out long id)) return id;
-                }
-            }
-        }
-        catch { }
         return 0;
     }
 
-    /// <summary>构造 QQ 分享卡片 CQ 码（com.tencent.structmsg，json 样式用）</summary>
-    private static string BuildJsonMusicCq(string title, long ncmId)
-    {
-        long ctime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        string jump = $"https://music.163.com/song?id={ncmId}";
-        var meta = new Dictionary<string, object>
-        {
-            ["music"] = new Dictionary<string, object>
-            {
-                ["app_type"] = 1,
-                ["appid"] = 100495085,
-                ["ctime"] = ctime,
-                ["desc"] = title,
-                ["jumpUrl"] = jump,
-                ["musicUrl"] = jump,
-                ["preview"] = "",
-                ["sourceMsgId"] = "0",
-                ["source_icon"] = "",
-                ["source_url"] = "",
-                ["tag"] = "网易云音乐",
-                ["title"] = title
-            }
-        };
-        var payload = new Dictionary<string, object>
-        {
-            ["app"] = "com.tencent.structmsg",
-            ["config"] = new Dictionary<string, object>
-            {
-                ["autosize"] = true,
-                ["ctime"] = ctime,
-                ["forward"] = true,
-                ["token"] = Guid.NewGuid().ToString("N"),
-                ["type"] = "normal"
-            },
-            ["desc"] = "音乐",
-            ["extra"] = new Dictionary<string, object> { ["app_type"] = 1, ["appid"] = 100495085, ["uin"] = 0 },
-            ["meta"] = meta,
-            ["prompt"] = $"[分享]{title}",
-            ["ver"] = "0.0.0.1",
-            ["view"] = "music"
-        };
-        string json = JsonSerializer.Serialize(payload);
-        return $"[CQ:json,data={CqEscape(json)}]";
-    }
 
     /// <summary>网易云歌曲ID → 直链（仅供 record/custom 样式使用：meting type=url 优先，vkeys 兜底）</summary>
     private static async Task<string?> ResolveNcmUrlAsync(long id)
