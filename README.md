@@ -67,6 +67,12 @@ QQ 消息 ID 为负数，撤回/贴表情/引用/转发必须使用真实 ID。�
 - 撤回合并转发卡片类消息会失败（NapCat 平台限制）
 - 实时消息捕获参考了 [YuYang.QQTools](https://github.com/3026838203/YuYang.QQTools) 的 WebSocket 监听思路，特此致谢
 
+## v4.9.14 更新说明
+
+- **修复私聊引用/撤回/贴表情/转发全部定位失败**：messageType 省略时旧代码一律按群聊处理，私聊里传对方QQ会被当成群号导致永远找不到消息。现改为会话类型自动判定（显式 messageType 优先 → GroupStates/缓存证据 → 群历史探测失败自动按私聊），ReplyRecent/SetEmojiRecent/DeleteMsgRecent/ForwardRecent/SendForwardById/SendForwardNew/QGetMessages 全部统一走该判定；QGetMessages 误把对方QQ传成群号时自动按私聊纠正。
+- **封堵私聊贴表情假成功**：QQ 平台不支持私聊表情回应（接口返回成功但实际不生效），SetEmojiRecent 解析到私聊消息时如实提示"QQ私聊不支持贴表情回应，可用文字/戳一戳回应"。
+- **私聊零参数引用**：判定为私聊时 ReplyRecent/SetEmojiRecent 省略 target 自动指向对方（私聊只有两个人）。
+
 ## v4.9.13 更新说明
 
 - **删除撤回时间预拒**：115秒预判存在误判（实测1分钟内的消息被误报超时），且回执文案本已含超时可能性说明，故整个移除——任何消息都直接发撤回请求，只有 delete_msg 真实报错才提示。

@@ -496,10 +496,10 @@ public class QQEnhanceModule(
     // ==================== 历史消息回拉补齐（缓存不足时自动调用，message_id 为真实可用ID） ====================
 
     /// <summary>回拉群/私聊历史消息写入缓存。返回新增条数。只取 message_id 字段（不要与分页参数 message_seq 混淆）</summary>
-    private async Task<int> BackfillHistoryAsync(long groupId, long userId, int count)
+    private async Task<(bool ok, int added)> BackfillHistoryAsync(long groupId, long userId, int count)
     {
         OneBotClient? client = GetClient();
-        if (client == null) return 0;
+        if (client == null) return (false, 0);
         try
         {
             JsonElement data;
@@ -513,7 +513,7 @@ public class QQEnhanceModule(
             if (data.ValueKind != JsonValueKind.Object ||
                 !data.TryGetProperty("messages", out var msgs) ||
                 msgs.ValueKind != JsonValueKind.Array)
-                return 0;
+                return (false, 0);
 
             long botId = GetBotId();
             int added = 0;
@@ -541,12 +541,12 @@ public class QQEnhanceModule(
                 });
                 added++;
             }
-            return added;
+            return (true, added);
         }
         catch (Exception e)
         {
             logger.LogDebug(e, "回拉历史消息失败 group={GroupId} user={UserId}", groupId, userId);
-            return 0;
+            return (false, 0);
         }
     }
 
@@ -722,6 +722,19 @@ public class QQEnhanceModule(
             .FirstOrDefault();
     }
 
+    /// <summary>判定 targetId 是群还是私聊：显式 messageType 优先；GroupStates/缓存证据次之；
+    /// 都没有时群历史探测（群号能拉到=群，报错=按私聊）——解决私聊场景省略 messageType 被误判成群的问题</summary>
+    private async Task<bool> DetectIsGroupAsync(long id, string messageType)
+    {
+        if (messageType == "group") return true;
+        if (messageType == "private") return false;
+        if (qChatService.GroupStates.ContainsKey(id)) return true;
+        if (_liveMessages.Any(m => m.GroupId == id)) return true;
+        if (_liveMessages.Any(m => m.GroupId == 0 && m.PeerId == id)) return false;
+        var (ok, _) = await BackfillHistoryAsync(id, 0, 1);
+        return ok;
+    }
+
     // ==================== 列表快照（list=true 序号绑定，三功能共用） ====================
 
     private sealed record ListSnapshot(long ScopeId, bool IsGroup, string Target, DateTime Time, long[] Ids);
@@ -764,7 +777,9 @@ public class QQEnhanceModule(
     {
         var (msg, isGroup, scopeId, error) = await ResolveTargetMessageAsync(target, targetId, messageType, 1, includeRecalled: true);
         if (scopeId == 0 && msg == null) return error!;
-        bool g = msg != null ? isGroup : messageType != "private";
+        bool g = msg != null ? isGroup
+            : scopeId != 0 ? await DetectIsGroupAsync(scopeId, messageType)
+            : messageType != "private";
         long sc = msg != null ? scopeId : targetId;
         string nt = NormalizeTarget(target);
         bool self = nt == "我";
@@ -795,11 +810,18 @@ public class QQEnhanceModule(
     private async Task<(LiveMessage? msg, bool isGroup, long scopeId, string? error)> ResolveTargetMessageAsync(
         string target, long targetId, string messageType, int index = 1, bool includeRecalled = false)
     {
-        bool isGroup = messageType != "private";
         long scopeId = targetId;
+        bool isGroup;
 
-        if (scopeId == 0)
+        if (scopeId != 0)
         {
+            // targetId 明确给出但 messageType 省略时自动判定群/私聊（不再一律当群聊）
+            isGroup = await DetectIsGroupAsync(scopeId, messageType);
+        }
+        else
+        {
+            isGroup = messageType != "private";
+
             LiveMessage? any = FindLatestFromUserAnywhere(target);
             // 注意：此处用最近一条定位"会话"，定位后按 index 在该会话内取倒数第N条
             if (any == null)
@@ -843,7 +865,7 @@ public class QQEnhanceModule(
         "201=点赞 264=捂脸 182=笑哭 271=吃瓜 270=emm 179=doge 269=暗中观察 273=我酸了 272=呵呵哒 222=抱抱 227=拍手 246=加油抱抱 116=示爱 122=爱你 214=啵啵 219=蹭一蹭 111=可怜 106=委屈 173=泪奔 262=脑阔疼 268=问号脸 265=辣眼睛 266=哦哟 267=头秃 277=汪汪 278=汗 281=无眼笑 282=敬礼 284=面无表情 285=摸鱼 287=哦 289=睁眼 104=哈欠 109=左亲亲 118=抱拳 120=拳头 123=NO 124=OK 125=转圈 129=挥手 144=喝彩 147=棒棒糖 171=茶 174=无奈 175=卖萌 176=小纠结 180=惊喜 181=骚扰 183=我最美 203=托脸 212=托腮 232=佛系 240=喷脸 243=甩头";
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("给QQ消息贴表情回应（一步到位，无需先查ID）。看到有趣/赞同/暖心/好笑的消息随手贴一个（常用：201=点赞 264=捂脸 182=笑哭 271=吃瓜 270=emm 179=doge 269=暗中观察 273=我酸了 272=呵呵哒 222=抱抱 227=拍手 246=加油抱抱 116=示爱 122=爱你 214=啵啵 219=蹭一蹭 111=可怜 106=委屈 173=泪奔 262=脑阔疼 268=问号脸 265=辣眼睛，更多可传 emojiId=0 查看完整对照表再选），这是真人最轻量的互动方式，不需要说话就可以直接贴。两种用法：1) 默认贴 target 的最近一条（index 可指定倒数第N条）；2) 已知真实消息ID时直接传 messageId（必须来自 QGetMessages 或撤回列表，严禁编造）")]
+    [Description("给QQ消息贴表情回应（一步到位，无需先查ID，仅群聊消息可贴，私聊平台不支持）。看到有趣/赞同/暖心/好笑的消息随手贴一个（常用：201=点赞 264=捂脸 182=笑哭 271=吃瓜 270=emm 179=doge 269=暗中观察 273=我酸了 272=呵呵哒 222=抱抱 227=拍手 246=加油抱抱 116=示爱 122=爱你 214=啵啵 219=蹭一蹭 111=可怜 106=委屈 173=泪奔 262=脑阔疼 268=问号脸 265=辣眼睛，更多可传 emojiId=0 查看完整对照表再选），这是真人最轻量的互动方式，不需要说话就可以直接贴。两种用法：1) 默认贴 target 的最近一条（index 可指定倒数第N条）；2) 已知真实消息ID时直接传 messageId（必须来自 QGetMessages 或撤回列表，严禁编造）")]
     public async Task SetEmojiRecent(
         [Description("目标用户QQ号或昵称，\"我\"表示自己（messageId 模式下可省略）")] string target = "",
         [Description("表情ID，默认201=点赞；传 0 = 不贴表情，只显示完整表情ID对照表（看完再选）")] int emojiId = 201,
@@ -864,16 +886,27 @@ public class QQEnhanceModule(
             return;
         }
 
+        // 私聊平台不支持贴表情（接口假成功）——直接如实封堵
         long mid;
         if (messageId != 0)
         {
+            if (_liveById.TryGetValue(messageId, out LiveMessage? k) && k.GroupId == 0)
+            {
+                interactor.Poke("QQ私聊不支持贴表情回应，可用文字/戳一戳回应");
+                return;
+            }
             mid = messageId;
         }
         else
         {
+            // 私聊只有两个人：判定为私聊时 target 省略自动=对方
+            if (string.IsNullOrWhiteSpace(target) && targetId != 0 &&
+                !await DetectIsGroupAsync(targetId, messageType))
+                target = targetId.ToString();
             if (string.IsNullOrWhiteSpace(target)) { interactor.Poke("请传 target（QQ号或昵称）或 messageId（真实消息ID）"); return; }
             (LiveMessage? msg, string? error) = await ResolveByIndexAsync(target, targetId, messageType, index);
             if (msg == null) { interactor.Poke(error!); return; }
+            if (msg.GroupId == 0) { interactor.Poke("QQ私聊不支持贴表情回应，可用文字/戳一戳回应"); return; }
             if (msg.IsRecalled) { interactor.Poke($"第 {index} 条 [消息ID:{msg.MessageId}]已被撤回，不能贴表情，请选其他序号或重新 list=true"); return; }
             mid = msg.MessageId;
         }
@@ -930,7 +963,7 @@ public class QQEnhanceModule(
     public async Task DeleteMsgRecent(
         [Description("目标群号或对方QQ（可省略，省略时自动找目标最近发言所在会话）")] long targetId = 0,
         [Description("撤回谁的消息：默认\"我\"，管理员撤群员时填对方QQ号")] string target = "我",
-        [Description("消息类型：group或private，可省略")] string messageType = "",
+        [Description("消息类型：group或private，可省略，省略时自动判定")] string messageType = "",
         [Description("撤回倒数第几条：默认1=最近一条，2=倒数第二条，以此类推")] int index = 1,
         [Description("真实消息ID（可选，传入则直接撤该条，忽略 target/index/list）")] long messageId = 0,
         [Description("true=只列出 target 最近10条候选（不撤回），看完用 index=序号 或 messageId 撤；序号在快照有效期内不受新消息影响")] bool list = false)
@@ -1139,8 +1172,15 @@ public class QQEnhanceModule(
         if (replyToId != 0)
         {
             mid = replyToId;
-            isGroup = messageType != "private";
             scopeId = targetId;
+            if (scopeId != 0)
+            {
+                isGroup = await DetectIsGroupAsync(scopeId, messageType);
+            }
+            else
+            {
+                isGroup = messageType != "private";
+            }
             if (scopeId == 0)
             {
                 if (_liveById.TryGetValue(replyToId, out LiveMessage? known))
@@ -1157,6 +1197,10 @@ public class QQEnhanceModule(
         }
         else
         {
+            // 私聊只有两个人：判定为私聊时 target 省略自动=对方
+            if (string.IsNullOrWhiteSpace(target) && targetId != 0 &&
+                !await DetectIsGroupAsync(targetId, messageType))
+                target = targetId.ToString();
             if (string.IsNullOrWhiteSpace(target)) { interactor.Poke("请传 target（QQ号或昵称）或 replyToId（真实消息ID）"); return; }
             (LiveMessage? msg, string? error) = await ResolveByIndexAsync(target, targetId, messageType, index);
             if (msg == null) { interactor.Poke(error!); return; }
@@ -1202,12 +1246,12 @@ public class QQEnhanceModule(
     public async Task ForwardRecent(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("转发条数，1-50，默认5")] int count = 5,
-        [Description("消息类型：group或private，默认group")] string messageType = "group")
+        [Description("消息类型：group或private，可省略，省略时自动判定")] string messageType = "")
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
         if (targetId == 0) { interactor.Poke("targetId不能为0"); return; }
 
-        bool isGroup = messageType != "private";
+        bool isGroup = await DetectIsGroupAsync(targetId, messageType);
         count = Math.Clamp(count, 1, 50);
 
         List<LiveMessage> Query() => _liveMessages
@@ -1258,12 +1302,12 @@ public class QQEnhanceModule(
     public async Task SendForwardById(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("合并转发消息的消息ID（来自QGetMessages）")] long forwardId,
-        [Description("消息类型：group或private，默认group")] string messageType = "group")
+        [Description("消息类型：group或private，可省略，省略时自动判定")] string messageType = "")
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
         // NapCat node schema 强制要求 nickname/content 必填，缺失直接 RetCode 1400；id 有效时忽略这两个字段
         var nodes = new List<object> { new { type = "node", data = new { id = forwardId.ToString(), nickname = "QQ用户", content = "" } } };
-        var (okFwd, text) = await SendForwardCoreAsync(messageType != "private", targetId, nodes);
+        var (okFwd, text) = await SendForwardCoreAsync(await DetectIsGroupAsync(targetId, messageType), targetId, nodes);
         if (!okFwd) interactor.Poke(text);  // 成功静默
     }
 
@@ -1272,7 +1316,7 @@ public class QQEnhanceModule(
     public async Task SendForwardNew(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("节点JSON数组（必须是完整合法的JSON，[]闭合）")] string nodesJson,
-        [Description("消息类型：group或private，默认group")] string messageType = "group")
+        [Description("消息类型：group或private，可省略，省略时自动判定")] string messageType = "")
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
         try
@@ -1339,7 +1383,7 @@ public class QQEnhanceModule(
                 return;
             }
 
-            var (okNew, text) = await SendForwardCoreAsync(messageType != "private", targetId, nodes);
+            var (okNew, text) = await SendForwardCoreAsync(await DetectIsGroupAsync(targetId, messageType), targetId, nodes);
             if (!okNew) interactor.Poke(text);  // 成功静默
         }
         catch (Exception e)
@@ -1736,6 +1780,12 @@ public class QQEnhanceModule(
         OneBotClient? client = GetClient();
         if (client == null) { interactor.Poke("获取消息失败：QQ客户端不可用"); return; }
         if (groupId == 0 && userId == 0) { interactor.Poke("群聊请传 groupId，私聊请传 userId"); return; }
+        // 容错：AI 把对方QQ误传成群号时自动按私聊处理
+        if (userId == 0 && groupId != 0 && !await DetectIsGroupAsync(groupId, ""))
+        {
+            userId = groupId;
+            groupId = 0;
+        }
 
         // 防抖保护：同一会话15秒内查询超过2次进入冷却，防止AI递归查询
         string scopeKey = groupId != 0 ? $"g{groupId}" : $"u{userId}";
