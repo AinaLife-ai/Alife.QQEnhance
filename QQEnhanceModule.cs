@@ -1477,7 +1477,7 @@ public class QQEnhanceModule(
                 long ncmId = await ResolveNcmIdAsync(platform, musicId);
                 if (ncmId == 0)
                 {
-                    interactor.Poke($"未找到歌曲：{musicId}（换个关键词试试，如加上歌手名）");
+                    interactor.Poke($"未找到歌曲：{musicId}。可换个更短的关键词重试（只用歌名或只用歌手名），若多次失败说明搜索接口暂时不可用，可稍后再试");
                     return;
                 }
                 if (style == "record")
@@ -1520,10 +1520,10 @@ public class QQEnhanceModule(
                 string cardId;
                 if (platform == "search")
                 {
-                    long ncmId = await SearchNetEaseIdAsync(musicId);
+                    long ncmId = await SearchNetEaseIdAsync(musicId, logger);
                     if (ncmId == 0)
                     {
-                        interactor.Poke($"未找到歌曲：{musicId}（换个关键词试试，如加上歌手名）");
+                        interactor.Poke($"未找到歌曲：{musicId}。可换个更短的关键词重试（只用歌名或只用歌手名），若多次失败说明搜索接口暂时不可用，可稍后再试");
                         return;
                     }
                     cardId = ncmId.ToString();
@@ -1577,7 +1577,7 @@ public class QQEnhanceModule(
         return await SearchNetEaseIdAsync(musicId);
     }
 
-    /// <summary>关键词 → 网易云歌曲ID（仅网易云官方 web 搜索，与 KiraAI 同链路，避免可疑ID来源）</summary>
+    /// <summary>关键词 → 网易云歌曲ID（163api 最优先 → 官方web搜索 → meting 三级静默兜底，全失败才报错）</summary>
     /// <summary>请求音乐签名服务（与 NapCat 同一协议：POST {type,id}，返回卡片JSON字符串）。失败返回null</summary>
     private static async Task<string?> SignMusicCardAsync(string signUrl, string type, string id)
     {
@@ -1633,9 +1633,30 @@ public class QQEnhanceModule(
         }
     }
 
-    private static async Task<long> SearchNetEaseIdAsync(string keyword)
+    private static async Task<long> SearchNetEaseIdAsync(string keyword, ILogger? logger = null)
     {
-        // 1. 网易云官方 web 搜索
+        // 1. 163api（NCM-Downloader 同款搜索源，最优先：实测稳定、ID有效）
+        try
+        {
+            string url = "https://163api.qijieya.cn/search?keywords=" + Uri.EscapeDataString(keyword);
+            using var resp = await _http.GetAsync(url);
+            if (resp.IsSuccessStatusCode)
+            {
+                using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                if (doc.RootElement.TryGetProperty("result", out var result) &&
+                    result.TryGetProperty("songs", out var songs) &&
+                    songs.GetArrayLength() > 0)
+                {
+                    long id = songs[0].GetProperty("id").GetInt64();
+                    logger?.LogDebug("音乐搜索命中 [163api]：{Keyword} → {Id}", keyword, id);
+                    return id;
+                }
+            }
+            logger?.LogDebug("音乐搜索 [163api] 无结果：{Keyword}", keyword);
+        }
+        catch (Exception ex) { logger?.LogDebug("音乐搜索 [163api] 异常：{Msg}", ex.Message); }
+
+        // 2. 网易云官方 web 搜索（裸调不稳定，常返回空/-462，作为兜底）
         try
         {
             string url = "https://music.163.com/api/search/get/web?s=" + Uri.EscapeDataString(keyword) + "&type=1&limit=1&offset=0";
@@ -1649,11 +1670,40 @@ public class QQEnhanceModule(
                 if (doc.RootElement.TryGetProperty("result", out var result) &&
                     result.TryGetProperty("songs", out var songs) &&
                     songs.GetArrayLength() > 0)
-                    return songs[0].GetProperty("id").GetInt64();
+                {
+                    long id = songs[0].GetProperty("id").GetInt64();
+                    logger?.LogDebug("音乐搜索命中 [官方web搜索]：{Keyword} → {Id}", keyword, id);
+                    return id;
+                }
+            }
+            logger?.LogDebug("音乐搜索 [官方web搜索] 无结果：{Keyword}", keyword);
+        }
+        catch (Exception ex) { logger?.LogDebug("音乐搜索 [官方web搜索] 异常：{Msg}", ex.Message); }
+
+        // 3. meting 搜索兜底（从 url 字段解析 id）
+        try
+        {
+            string url = "https://api.qijieya.cn/meting/?type=search&id=" + Uri.EscapeDataString(keyword) + "&limit=1";
+            using var resp = await _http.GetAsync(url);
+            if (resp.IsSuccessStatusCode)
+            {
+                using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
+                {
+                    string urlField = doc.RootElement[0].TryGetProperty("url", out var uf) ? uf.GetString() ?? "" : "";
+                    var m = Regex.Match(urlField, @"id=(\d+)");
+                    if (m.Success && long.TryParse(m.Groups[1].Value, out long id))
+                    {
+                        logger?.LogDebug("音乐搜索命中 [meting]：{Keyword} → {Id}", keyword, id);
+                        return id;
+                    }
+                }
             }
         }
-        catch { }
+        catch (Exception ex) { logger?.LogDebug("音乐搜索 [meting] 异常：{Msg}", ex.Message); }
 
+        // 三级全部失败才报错
+        logger?.LogWarning("音乐搜索三源全部无结果：{Keyword}", keyword);
         return 0;
     }
 
