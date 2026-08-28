@@ -95,6 +95,18 @@ public class QQEnhanceConfig
     [Description("戳回决策/被赞/被贴表情等事件提示的最小间隔，默认10秒")]
     public double NoticeCooldownSeconds { get; set; } = 10;
 
+    [DisplayName("戳一戳防刷限次")]
+    [Description("同一人同一窗口内最多受理的戳一戳次数，超出后静默忽略（防双AI互戳/连戳脚本无限循环；0=不限制）。注意：不影响正常玩闹，仅作保险丝")]
+    public int PokeBackFloodLimitCount { get; set; } = 10;
+
+    [DisplayName("戳一戳防刷窗口秒数")]
+    [Description("配合防刷限次的滑动窗口时长（秒），默认60")]
+    public int PokeBackFloodWindowSeconds { get; set; } = 60;
+
+    [DisplayName("回戳回执抑制秒数")]
+    [Description("主动戳人（含回戳）后，N秒内收到同一人的戳通知视为我方动作的回执回声而忽略（防NapCat私聊通知方向字段不规范时把回执当成新戳造成回圈；0=不抑制）")]
+    public int PokeEchoSuppressSeconds { get; set; } = 3;
+
     [DisplayName("被赞感知")]
     [Description("感知资料卡被点赞并提示AI可回赞（走官方连接事件，无需额外上报），默认关闭")]
     public bool PerceiveProfileLike { get; set; } = false;
@@ -554,6 +566,21 @@ public class QQEnhanceModule(
     private sealed record PokeRequest(long UserId, long GroupId, bool IsGroup, DateTime Time);
     private PokeRequest? _lastPokeRequest;
     private DateTime _lastPokePromptTime = DateTime.MinValue;
+    private readonly object _pokeLock = new();
+    /// <summary>插件近期主动发出的戳一戳（目标QQ, 时间），用于回执回声抑制</summary>
+    private readonly List<(long UserId, DateTime Time)> _recentOutgoingPokes = new();
+    /// <summary>戳一戳防刷滑动窗口：(用户QQ, 群号) → 受理时间列表</summary>
+    private readonly Dictionary<(long UserId, long GroupId), List<DateTime>> _pokeFlood = new();
+
+    /// <summary>记录一次插件主动发出的戳一戳（供回执回声抑制判定）</summary>
+    private void MarkOutgoingPoke(long userId)
+    {
+        lock (_pokeLock)
+        {
+            _recentOutgoingPokes.RemoveAll(p => (DateTime.Now - p.Time).TotalMinutes > 2);
+            _recentOutgoingPokes.Add((userId, DateTime.Now));
+        }
+    }
 
     protected override Task OnAwake()
     {
@@ -1060,6 +1087,7 @@ public class QQEnhanceModule(
         if (!Configuration.PokeEnabled) { interactor.Poke("戳一戳功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("戳一戳", "PokeGroupMember")); return; }
         OneBotClient? client = GetClient();
+        MarkOutgoingPoke(userId);
         string? err = await CallActionSafeAsync("group_poke", new { group_id = groupId, user_id = userId }, "戳一戳", client);
         if (err != null) interactor.Poke(err);
     }
@@ -1071,6 +1099,7 @@ public class QQEnhanceModule(
     {
         if (!Configuration.PokeEnabled) { interactor.Poke("戳一戳功能已禁用"); return; }
         OneBotClient? client = GetClient();
+        MarkOutgoingPoke(userId);
         string? err = await CallActionSafeAsync("friend_poke", new { user_id = userId }, "私聊戳一戳", client);
         if (err != null) interactor.Poke(err);
     }
@@ -1105,6 +1134,7 @@ public class QQEnhanceModule(
         }
 
         OneBotClient? client = GetClient();
+        MarkOutgoingPoke(req.UserId);
         string? err;
         if (req.IsGroup)
             err = await CallActionSafeAsync("group_poke", new { group_id = req.GroupId, user_id = req.UserId }, "戳一戳", client);
@@ -1887,8 +1917,59 @@ public class QQEnhanceModule(
                 if (oneBotEvent is OneBotPokeEvent pokeEvent)
                     targetId = pokeEvent.TargetId;
 
+                logger.LogDebug("poke通知原文：user_id={User} target_id={Target} self_id={Self} group_id={Group}",
+                    noticeEvent.UserId, targetId, noticeEvent.SelfId, noticeEvent.GroupId);
+
+                // 第一层：自己发起的戳一戳（含回戳动作产生的回执通知）一律无视，防无限回圈
+                if (noticeEvent.UserId == noticeEvent.SelfId)
+                {
+                    logger.LogDebug("忽略自己发起的poke通知（sender==self）");
+                    return;
+                }
+
                 // 只处理自己被戳
                 if (targetId != 0 && targetId != noticeEvent.SelfId) return;
+
+                // 第二层：回执回声抑制——刚主动戳过此人，短时间内同一人的戳通知视为我方动作的回执而非对方新戳
+                int echoSec = Configuration.PokeEchoSuppressSeconds;
+                if (echoSec > 0)
+                {
+                    lock (_pokeLock)
+                    {
+                        _recentOutgoingPokes.RemoveAll(p => (DateTime.Now - p.Time).TotalMinutes > 2);
+                        if (_recentOutgoingPokes.Any(p => p.UserId == noticeEvent.UserId &&
+                                                         (DateTime.Now - p.Time).TotalSeconds <= echoSec))
+                        {
+                            logger.LogDebug("忽略疑似回戳回执回声：user_id={User}（{Sec}秒内我方刚戳过TA）",
+                                noticeEvent.UserId, echoSec);
+                            return;
+                        }
+                    }
+                }
+
+                // 第三层：防刷限次（滑动窗口，超限静默——AI无感知）——防双AI互戳等双方逻辑都正确的回圈
+                int limitCount = Configuration.PokeBackFloodLimitCount;
+                int limitWin = Configuration.PokeBackFloodWindowSeconds;
+                if (limitCount > 0 && limitWin > 0)
+                {
+                    lock (_pokeLock)
+                    {
+                        var key = (noticeEvent.UserId, noticeEvent.GroupId);
+                        if (!_pokeFlood.TryGetValue(key, out var list))
+                        {
+                            list = new List<DateTime>();
+                            _pokeFlood[key] = list;
+                        }
+                        list.RemoveAll(t => (DateTime.Now - t).TotalSeconds > limitWin);
+                        if (list.Count >= limitCount)
+                        {
+                            logger.LogDebug("戳一戳防刷触发：user_id={User} 在 {Win}s 内已达 {Count} 次，本次静默忽略",
+                                noticeEvent.UserId, limitWin, limitCount);
+                            return;
+                        }
+                        list.Add(DateTime.Now);
+                    }
+                }
 
                 bool isGroup = noticeEvent.GroupId != 0;
                 _lastPokeRequest = new PokeRequest(noticeEvent.UserId, noticeEvent.GroupId, isGroup, DateTime.Now);
