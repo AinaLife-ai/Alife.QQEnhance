@@ -774,11 +774,16 @@ public class QQEnhanceModule(
         long botId = GetBotId();
         bool self = target is "我" or "自己" || (byId && botId != 0 && targetUin == botId);
 
-        return _liveMessages
+        var matches = _liveMessages
             .Where(NotRecalled)
             .Where(m => self ? m.IsSelf
                 : byId ? m.UserId == targetUin
                 : m.Nickname.Contains(target, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        // 昵称跨会话匹配多人时不猜会话（与 FindFromUser 同款守卫），返回null让调用方提示显式传 targetId
+        if (!byId && !self && matches.Select(m => m.UserId).Distinct().Count() > 1)
+            return null;
+        return matches
             .OrderByDescending(m => m.Time)
             .ThenByDescending(m => m.Seq)
             .FirstOrDefault();
@@ -852,7 +857,9 @@ public class QQEnhanceModule(
             .Where(m => self ? m.IsSelf
                 : byIdUin ? (m.UserId == targetUin || (botId != 0 && targetUin == botId && m.IsSelf))
                 : m.Nickname.Contains(nt, StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(m => m.Time).ThenByDescending(m => m.MessageId)
+            // 排序必须与 FindFromUser 定位严格一致（Time→Seq）：QQ时间戳秒级精度，同秒消息靠插入顺序（继承NapCat历史页时序）决胜；
+            // 不能用MessageId比大小——QQ平台消息ID可能为负，大小关系不可靠，且与定位不一致会导致列表序号与实际解析错位
+            .OrderByDescending(m => m.Time).ThenByDescending(m => m.Seq)
             .Take(10).ToList();
         if (candidates.Count == 0) return $"未找到 {target} 的消息记录";
         _listSnapshot = new ListSnapshot(sc, g, nt, DateTime.Now, candidates.Select(c => c.MessageId).ToArray());
@@ -952,10 +959,18 @@ public class QQEnhanceModule(
         long mid;
         if (messageId != 0)
         {
-            if (_liveById.TryGetValue(messageId, out LiveMessage? k) && k.GroupId == 0)
+            if (_liveById.TryGetValue(messageId, out LiveMessage? k))
             {
-                interactor.Poke("QQ私聊不支持贴表情回应，可用文字/戳一戳回应");
-                return;
+                if (k.GroupId == 0)
+                {
+                    interactor.Poke("QQ私聊不支持贴表情回应，可用文字/戳一戳回应");
+                    return;
+                }
+                if (k.IsRecalled)
+                {
+                    interactor.Poke($"[消息ID:{messageId}]已被撤回，不能贴表情，请选其他消息");
+                    return;
+                }
             }
             mid = messageId;
         }
@@ -1245,6 +1260,11 @@ public class QQEnhanceModule(
             else
             {
                 isGroup = messageType != "private";
+            }
+            if (_liveById.TryGetValue(replyToId, out LiveMessage? knownMsg) && knownMsg.IsRecalled)
+            {
+                interactor.Poke($"[消息ID:{replyToId}]已被撤回，无法引用，请选择其他消息");
+                return;
             }
             if (scopeId == 0)
             {

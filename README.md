@@ -67,6 +67,13 @@ QQ 消息 ID 为负数，撤回/贴表情/引用/转发必须使用真实 ID。�
 - 撤回合并转发卡片类消息会失败（NapCat 平台限制）
 - 实时消息捕获参考了 [YuYang.QQTools](https://github.com/3026838203/YuYang.QQTools) 的 WebSocket 监听思路，特此致谢
 
+## v4.9.19 更新说明
+
+- **修复群聊引用/操作偶发错位（排序不一致）**：候选列表渲染按 Time→MessageId 排序，而实际定位按 Time→Seq（插入顺序）排序——QQ时间戳是秒级精度，同秒多条消息时两边序号会对不上，AI按列表报index却操作到另一条。现全插件统一为 Time→Seq（Seq继承NapCat历史页真实时序；不用MessageId比大小是因为QQ平台消息ID可能为负、大小关系不可靠），列表序号与实际解析在任何缓存状态下严格一致。影响面：撤回/贴表情/引用/转发/QGetMessages 全部排序点已对齐
+- **QGetMessages 恢复已撤回存档展示**：之前查询过滤了已撤回消息，但表头宣称"标注【已撤回】仅作存档"，AI找不到刚撤的消息会困惑；现已撤回条目正常展示并标注（与候选列表一致）
+- **已知ID直达补已撤回守卫**：SetEmojiRecent/ReplyRecent 直接传 messageId 时，若该消息已撤回会明确提示而不是发给NapCat碰运气
+- **昵称跨会话匹配多人时不再猜会话**：targetId缺省+昵称匹配到多个不同QQ时，返回提示显式传 targetId，避免静默选错会话
+
 ## v4.9.18 更新说明
 
 - **修复私聊"最近一条"定位到数天前旧消息（引用/撤回/列表错位）**：`get_friend_msg_history` 不传 message_seq 时实测可能返回陈旧页（最新消息是数天前），导致私聊引用回复引到旧消息。现私聊历史回拉改为两段式：常规拉取后，以缓存中该会话已知最大 message_id 为锚点**前向追新**（NapCat 传 message_seq 会返回该条之后更新的消息），逐页追上最新为止（最多4页防呆）。群聊路径不变。所有依赖私聊消息定位的功能（ReplyRecent 引用、DeleteMsgRecent 撤回、ForwardRecent 转发、QGetMessages/候选列表）同步修复
