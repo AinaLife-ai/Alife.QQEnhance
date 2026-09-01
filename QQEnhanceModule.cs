@@ -507,32 +507,31 @@ public class QQEnhanceModule(
 
     // ==================== 历史消息回拉补齐（缓存不足时自动调用，message_id 为真实可用ID） ====================
 
-    /// <summary>回拉群/私聊历史消息写入缓存。返回新增条数。只取 message_id 字段（不要与分页参数 message_seq 混淆）</summary>
+    /// <summary>回拉群/私聊历史消息写入缓存。返回新增条数。只取 message_id 字段（不要与分页参数 message_seq 混淆）。
+    /// 私聊特殊处理：get_friend_msg_history 不传 message_seq 时实测可能返回陈旧页（最新消息是数天前，
+    /// 导致私聊"最近一条"定位到旧消息）—— NapCat 传 message_seq 会返回该条之后（更新）的消息，
+    /// 因此私聊在常规拉取后，用缓存中该会话已知最大 message_id 为锚点前向追新，直至追上最新或翻页上限</summary>
     private async Task<(bool ok, int added)> BackfillHistoryAsync(long groupId, long userId, int count)
     {
         OneBotClient? client = GetClient();
         if (client == null) return (false, 0);
-        try
-        {
-            JsonElement data;
-            if (groupId != 0)
-                data = await client.CallActionAsync<JsonElement>("get_group_msg_history",
-                    new { group_id = groupId, count = Math.Clamp(count, 1, 50) });
-            else
-                data = await client.CallActionAsync<JsonElement>("get_friend_msg_history",
-                    new { user_id = userId, count = Math.Clamp(count, 1, 50) });
+        long botId = GetBotId();
 
+        // 解析一页历史消息写入缓存，返回 (新增条数, 页内最大message_id)
+        (int added, long maxId) ParsePage(JsonElement data)
+        {
             if (data.ValueKind != JsonValueKind.Object ||
                 !data.TryGetProperty("messages", out var msgs) ||
                 msgs.ValueKind != JsonValueKind.Array)
-                return (false, 0);
-
-            long botId = GetBotId();
+                return (0, 0);
             int added = 0;
+            long maxId = 0;
             foreach (JsonElement m in msgs.EnumerateArray())
             {
                 long mid = ReadPropLong(m, "message_id");
-                if (mid == 0 || _liveById.ContainsKey(mid)) continue;
+                if (mid == 0) continue;
+                if (mid > maxId) maxId = mid;
+                if (_liveById.ContainsKey(mid)) continue;
                 long uid = ReadPropLong(m, "user_id");
                 long gid = ReadPropLong(m, "group_id");
                 long time = ReadPropLong(m, "time");
@@ -553,7 +552,43 @@ public class QQEnhanceModule(
                 });
                 added++;
             }
-            return (true, added);
+            return (added, maxId);
+        }
+
+        try
+        {
+            int total = 0;
+            if (groupId != 0)
+            {
+                JsonElement data = await client.CallActionAsync<JsonElement>("get_group_msg_history",
+                    new { group_id = groupId, count = Math.Clamp(count, 1, 50) });
+                total = ParsePage(data).added;
+            }
+            else
+            {
+                // 第一拉：不传 seq（部分NapCat版本此调用返回最新页，部分返回陈旧页）
+                JsonElement data = await client.CallActionAsync<JsonElement>("get_friend_msg_history",
+                    new { user_id = userId, count = Math.Clamp(count, 1, 50) });
+                var (added, _) = ParsePage(data);
+                total += added;
+
+                // 前向追新：从缓存已知最大 message_id 起，逐页拉"之后"的消息直到追上最新（最多4页防呆）
+                for (int page = 0; page < 4; page++)
+                {
+                    long anchor = _liveMessages
+                        .Where(m => m.GroupId == 0 && m.PeerId == userId)
+                        .Select(m => m.MessageId).DefaultIfEmpty(0).Max();
+                    if (anchor == 0) break;
+                    JsonElement fwd = await client.CallActionAsync<JsonElement>("get_friend_msg_history",
+                        new { user_id = userId, message_seq = anchor.ToString(), count = 50 });
+                    var (fAdded, fMax) = ParsePage(fwd);
+                    total += fAdded;
+                    if (fAdded > 0)
+                        logger.LogDebug("私聊历史前向追新命中：user={UserId} 锚点={Anchor} 新增={Added} 第{Page}页", userId, anchor, fAdded, page + 1);
+                    if (fMax <= anchor || fAdded == 0) break; // 没有更新的消息了
+                }
+            }
+            return (true, total);
         }
         catch (Exception e)
         {
