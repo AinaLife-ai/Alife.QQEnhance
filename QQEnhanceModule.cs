@@ -1534,9 +1534,13 @@ public class QQEnhanceModule(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("消息类型：private或group，可省略，省略时自动判定")] string type = "",
         [Description("音乐平台：search=关键词搜索网易云（推荐）/163=网易云歌曲ID/qq/kugou/migu/kuwo=对应平台原生ID")] string platform = "search",
-        [Description("歌曲关键词（platform=search时）或平台音乐ID（其他platform时原样透传，不做任何转换）")] string musicId = "")
+        [Description("歌曲关键词（platform=search时）或平台音乐ID（其他platform时原样透传，不做任何转换）")] string musicId = "",
+        [Description("卡片样式（可选）：custom=免签名自定义卡片（协议端不支持签名时的可靠兜底）/record=语音条/163等=原生卡片（默认，走配置）。仅对网易云歌曲生效")] string style = "")
     {
         if (!Configuration.MusicCardEnabled) { interactor.Poke("音乐卡片功能已禁用"); return; }
+        // style参数仅对网易云生效：指定了就覆盖配置默认值；json样式已失效按163处理
+        string cfgStyle = string.IsNullOrWhiteSpace(style) ? Configuration.MusicCardStyle?.Trim() ?? "163" : style.Trim().ToLowerInvariant();
+        if (cfgStyle is not ("163" or "custom" or "record")) cfgStyle = "163";
         OneBotClient? client = GetClient();
         if (client == null) { interactor.Poke("音乐卡片发送失败：QQ客户端不可用"); return; }
         if (targetId == 0) { interactor.Poke("targetId不能为0"); return; }
