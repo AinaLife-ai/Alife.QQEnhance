@@ -115,6 +115,10 @@ public class QQEnhanceConfig
     [Description("感知群消息被贴表情并提示AI（走官方连接事件，无需额外上报），默认关闭")]
     public bool PerceiveEmojiLike { get; set; } = false;
 
+    [DisplayName("他人消息贴表情感知")]
+    [Description("感知群内其他用户给他人（非bot自己）消息贴表情并提示AI，默认关闭；被贴表情感知开启时本项才生效")]
+    public bool PerceiveOthersEmojiLike { get; set; } = false;
+
     [DisplayName("引用回复")]
     [Description("启用引用回复消息功能")]
     public bool ReplyEnabled { get; set; } = true;
@@ -1995,7 +1999,41 @@ public class QQEnhanceModule(
                 if (DateTime.Now - _lastEmojiLikePromptTime < NoticeCooldown) return;
                 _lastEmojiLikePromptTime = DateTime.Now;
                 long uid = noticeEvent.UserId;
-                interactor.Poke($"[System 用户{uid} 在群 {noticeEvent.GroupId} 给你的消息贴了表情。可以贴回去（SetEmojiRecent target={uid} targetId={noticeEvent.GroupId}）或接话回应，也可以忽略]");
+                // 用框架透传的 RawJson 解析模型未覆盖的 message_id，区分贴的是谁的消息
+                string detail;
+                long messageId = 0;
+                try
+                {
+                    if (!string.IsNullOrEmpty(noticeEvent.RawJson))
+                    {
+                        using var jd = JsonDocument.Parse(noticeEvent.RawJson);
+                        if (jd.RootElement.TryGetProperty("message_id", out var midElem))
+                        {
+                            if (midElem.ValueKind == JsonValueKind.Number && midElem.TryGetInt64(out long m)) messageId = m;
+                            else if (long.TryParse(midElem.GetString(), out long m2)) messageId = m2;
+                        }
+                    }
+                }
+                catch { }
+                if (messageId != 0 && _liveById.TryGetValue(messageId, out var known) && known.IsSelf)
+                {
+                    detail = $"在群 {noticeEvent.GroupId} 给你的消息贴了表情。可以贴回去（SetEmojiRecent target={uid} targetId={noticeEvent.GroupId}）或接话回应，也可以忽略";
+                }
+                else
+                {
+                    if (!Configuration.PerceiveOthersEmojiLike) return;
+                    string? authorName = null; string? rawSummary = null;
+                    if (messageId != 0 && _liveById.TryGetValue(messageId, out var msg))
+                    {
+                        authorName = string.IsNullOrEmpty(msg.Nickname) ? null : msg.Nickname;
+                        rawSummary = string.IsNullOrEmpty(msg.Raw) ? null : (msg.Raw.Length > 60 ? msg.Raw[..60] + "…" : msg.Raw);
+                    }
+                    string targetDesc = authorName ?? "其他成员";
+                    detail = rawSummary != null
+                        ? $"在群 {noticeEvent.GroupId} 给{targetDesc}的消息贴了表情，该消息内容：{rawSummary}（不是你的消息，无需特别回应，可忽略）"
+                        : $"在群 {noticeEvent.GroupId} 给{targetDesc}的消息贴了表情（不是你的消息，无需特别回应，可忽略）";
+                }
+                interactor.Poke($"[System 用户{uid} {detail}]");
             }
             else if (noticeType == "group_ban" && Configuration.PerceiveGroupBan)
             {
