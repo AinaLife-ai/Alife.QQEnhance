@@ -55,11 +55,11 @@ public class QQEnhanceConfig
     public bool GroupBanEnabled { get; set; } = true;
 
     [DisplayName("音乐卡片")]
-    [Description("启用发送音乐卡片功能（默认custom自定义卡片，免签名本地渲染，全端可播放）")]
+    [Description("启用发送音乐卡片功能（默认样式见下方「音乐卡片样式」）")]
     public bool MusicCardEnabled { get; set; } = true;
 
     [DisplayName("音乐卡片样式")]
-    [Description("custom=自定义音乐段（免签名，协议端本地拼卡，不依赖签名服务，推荐，兼容NapCat/LLBot等）；163=网易云官方卡片（依赖NapCat签名，LLBot等协议端未实现签名会发送失败）；record=直接发语音条（网易云直链保底，任何端可播）；json=已废弃（依赖的公共签名服务已关停），配置为json会自动按163发送")]
+    [Description("custom=自定义音乐段（协议端本地拼卡，默认）；163=平台原生音乐卡片；record=直接发语音条（网易云直链保底，任何端可播）；json=已废弃，自动按163发送。注意：custom/record 需要网易云歌曲ID与直链，只对 platform=search/163 生效；qq/kugou/migu/kuwo 一律按原生卡片原样透传")]
     public string MusicCardStyle { get; set; } = "custom";
 
     [DisplayName("音乐签名服务地址")]
@@ -75,9 +75,9 @@ public class QQEnhanceConfig
     public int InteractionHintProbability { get; set; } = 100;
 
     [DisplayName("互动提示文本")]
-    [Description("附加在消息末尾的提示内容，可自定义。支持占位符：{scope}=群号或对方QQ、{type}=group或private、{uin}=发言人QQ、{nick}=发言人昵称、{poke}=戳一戳函数名（自动区分群聊/私聊）")]
+    [Description("附加在消息末尾的提示内容，可自定义。支持占位符：{scope}=群号或对方QQ、{type}=group或private、{uin}=发言人QQ、{nick}=发言人昵称、{poke}=戳一戳函数名（自动区分群聊/私聊）、{pokeargs}=戳一戳参数（自动区分群聊/私聊）")]
     public string InteractionHintText { get; set; } =
-        "(可随手互动：ReplyRecent targetid={scope} messagetype={type} target={uin} 引用{nick}这条 / SetEmojiRecent target={uin} 贴表情 / {poke} target={uin} 戳一戳 / SendQQLikes target={uin} 点赞——都是完整回应，无需说明)";
+        "(可随手互动：ReplyRecent targetid={scope} messagetype={type} target={uin} 引用{nick}这条 / SetEmojiRecent target={uin} 贴表情 / {poke} {pokeargs} 戳一戳 / SendQQLikes qq={uin} 点赞——都是完整回应，无需说明)";
 
     [DisplayName("被引用/被@回引提示")]
     [Description("当有人引用bot的消息或@bot时，在提示末尾追加一句回引建议（不含消息内容，省token），引导bot用引用回复回应")]
@@ -116,7 +116,7 @@ public class QQEnhanceConfig
     public bool PerceiveEmojiLike { get; set; } = false;
 
     [DisplayName("他人消息贴表情感知")]
-    [Description("感知他人消息被贴表情时也推送（需开启被贴表情感知），默认开启")]
+    [Description("感知他人消息被贴表情时也推送（需开启「被贴表情感知」）。注意：部分协议端只上报「回应自己消息」的表情通知，此时本开关不会产生额外提示；无法判定被贴消息归属时按未缓存处理，默认开启")]
     public bool PerceiveOthersEmojiLike { get; set; } = true;
 
     [DisplayName("引用回复")]
@@ -627,6 +627,18 @@ public class QQEnhanceModule(
         if (yuYangActive)
             logger.LogInformation("QQ增强：检测到 YuYang.QQTools 已启用，重叠功能将让位（兼容模式 {Mode}）", Configuration.CompatibilityMode);
 
+        // 配置自愈：旧默认提示文本里 {poke} target={uin} / SendQQLikes target={uin} 的参数名与实际函数签名不符
+        // （XmlHandler 按名取值，取不到会向 AI 抛"缺少参数"），老配置里存的是旧文本，这里就地修正并记日志
+        string healedHint = Configuration.InteractionHintText
+            .Replace("{poke} target={uin}", "{poke} {pokeargs}")
+            .Replace("{poke} groupId={scope} userId={uin}", "{poke} {pokeargs}")
+            .Replace("SendQQLikes target={uin}", "SendQQLikes qq={uin}");
+        if (!string.Equals(healedHint, Configuration.InteractionHintText, StringComparison.Ordinal))
+        {
+            Configuration.InteractionHintText = healedHint;
+            logger.LogInformation("QQ增强：已自动修正互动提示文本里的函数参数名，避免 AI 照抄后触发「缺少参数」");
+        }
+
         string explanation = yuYangActive
             ? """
                 使用规则：
@@ -680,6 +692,8 @@ public class QQEnhanceModule(
     /// <summary>官方QChat纠错规则要求"QQ消息输入必须输出QChat标签"，与QQ增强发送类函数冲突（用ReplyRecent回复后会触发纠错→AI又发一条重复确认）。
     /// 在所有模块Awake后把该规则替换为扩展版：输出含 QChat 或本插件任意函数名都算合规。模块销毁时恢复原规则。</summary>
     private MessageReplyRule? _originalQChatRule;
+    /// <summary>本插件添加的扩展版规则（恢复时只移除它，不按名字批量删）</summary>
+    private MessageReplyRule? _extendedQChatRule;
 
     protected override Task OnStart()
     {
@@ -687,7 +701,8 @@ public class QQEnhanceModule(
         {
             if (messageFilterService.MessageReplyRules is List<MessageReplyRule> rules)
             {
-                _originalQChatRule = rules.FirstOrDefault(r => r.Name == "QChatService");
+                _originalQChatRule = rules.FirstOrDefault(r =>
+                    string.Equals(r.Name, "QChatService", StringComparison.OrdinalIgnoreCase));
                 if (_originalQChatRule != null)
                 {
                     MessageReplyRule orig = _originalQChatRule;
@@ -697,15 +712,24 @@ public class QQEnhanceModule(
                         "SendQQLikes", "PokeGroupMember", "PokePrivateMember", "PokeBack", "GroupBan"
                     ];
                     rules.Remove(orig);
-                    messageFilterService.AddMessageReplyRule(new MessageReplyRule {
+                    _extendedQChatRule = new MessageReplyRule {
                         Name = orig.Name,
                         InputMatching = orig.InputMatching,
                         OutputMatching = output => orig.OutputMatching(output) ||
                             qqEnhanceFunctions.Any(f => output.Contains(f, StringComparison.OrdinalIgnoreCase)),
                         CorrectionMessage = orig.CorrectionMessage
-                    }, DestroyCancellationToken);
+                    };
+                    messageFilterService.AddMessageReplyRule(_extendedQChatRule, DestroyCancellationToken);
                     logger.LogInformation("QQ增强：已扩展QChat回复格式规则，使用QQ增强函数回复不再触发格式纠正");
                 }
+                else
+                {
+                    logger.LogWarning("QQ增强：未找到官方 QChatService 回复格式规则（官方可能已改名），使用QQ增强函数回复时可能仍会触发格式纠正");
+                }
+            }
+            else
+            {
+                logger.LogWarning("QQ增强：消息过滤规则列表类型不是预期的 List<MessageReplyRule>，已跳过回复格式规则扩展（不影响其他功能）");
             }
         }
         catch (Exception e)
@@ -725,13 +749,19 @@ public class QQEnhanceModule(
         ChatBot.ChatOver -= OnChatOver;
         ChatBot.ChatSend -= OnChatSendHint;
 
-        // 恢复官方QChat纠错规则（OnStart 中替换过）
+        // 恢复官方QChat纠错规则（OnStart 中替换过）——只移除本插件添加的那条扩展规则，
+        // 不按名字批量删除，避免误删官方或其它插件在此期间注册的同名规则
         if (_originalQChatRule != null &&
-            messageFilterService.MessageReplyRules is List<MessageReplyRule> restoreRules &&
-            !restoreRules.Any(r => r.Name == "QChatService" && ReferenceEquals(r, _originalQChatRule)))
+            messageFilterService.MessageReplyRules is List<MessageReplyRule> restoreRules)
         {
-            restoreRules.RemoveAll(r => r.Name == "QChatService");
-            restoreRules.Add(_originalQChatRule);
+            if (_extendedQChatRule != null)
+            {
+                if (!restoreRules.Remove(_extendedQChatRule))
+                    logger.LogDebug("QQ增强：扩展版QChat回复格式规则已不在列表中（可能已随模块销毁自动注销）");
+                _extendedQChatRule = null;
+            }
+            if (!restoreRules.Any(r => ReferenceEquals(r, _originalQChatRule)))
+                restoreRules.Add(_originalQChatRule);
             _originalQChatRule = null;
         }
 
@@ -1533,180 +1563,176 @@ public class QQEnhanceModule(
         s.Replace("&", "&amp;").Replace("[", "&#91;").Replace("]", "&#93;").Replace(",", "&#44;");
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("发送音乐到QQ聊天（点歌）。platform=search musicId=歌名关键词（如 晴天 周杰伦）即可，默认发网易云官方卡片（163原生段，与KiraAI版逐字节一致）。platform=163/qq/kugou/migu/kuwo 时 musicId 为该平台原生ID并原样透传（qq等平台依赖NapCat签名服务，公共签名已失效，失败请改用search）。接收方显示\"发送者版本过低\"=该平台签名通道失效，可在插件配置填 音乐签名服务地址，或把 音乐卡片样式 改为 record（直接发语音条，100%不受签名影响）。⚠发送可能较慢（约10秒），超时后请先用 QGetMessages 确认，不要重复发送")]
+    [Description("发送音乐到QQ聊天（点歌）。platform=search musicId=歌名关键词（如 晴天 周杰伦）即可；platform=163/qq/kugou/migu/kuwo 时 musicId 为该平台原生ID并原样透传。样式由配置「音乐卡片样式」决定，custom/record 只对网易云 search/163 生效（其它平台一律原生卡片）；被协议端拒绝时会按 163→custom→record 自动降级一次，超时不会重发（卡片可能已发出，请用 QGetMessages 确认，不要重复发送）")]
     public async Task SendMusicCard(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("消息类型：private或group，可省略，省略时自动判定")] string type = "",
         [Description("音乐平台：search=关键词搜索网易云（推荐）/163=网易云歌曲ID/qq/kugou/migu/kuwo=对应平台原生ID")] string platform = "search",
         [Description("歌曲关键词（platform=search时）或平台音乐ID（其他platform时原样透传，不做任何转换）")] string musicId = "",
-        [Description("卡片样式（可选）：custom=免签名自定义卡片（协议端不支持签名时的可靠兜底）/record=语音条/163等=原生卡片（默认，走配置）。仅对网易云歌曲生效")] string style = "")
+        [Description("卡片样式（可选）：custom=自定义卡片/record=语音条/163=原生卡片；省略则用配置默认值。仅对网易云歌曲（platform=search/163）生效，其它平台一律原生卡片")] string style = "")
     {
         if (!Configuration.MusicCardEnabled) { interactor.Poke("音乐卡片功能已禁用"); return; }
-        // style参数仅对网易云生效：指定了就覆盖配置默认值；json样式已失效按163处理
-        string cfgStyle = string.IsNullOrWhiteSpace(style) ? Configuration.MusicCardStyle?.Trim() ?? "163" : style.Trim().ToLowerInvariant();
-        if (cfgStyle is not ("163" or "custom" or "record")) cfgStyle = "163";
-        OneBotClient? client = GetClient();
-        if (client == null) { interactor.Poke("音乐卡片发送失败：QQ客户端不可用"); return; }
         if (targetId == 0) { interactor.Poke("targetId不能为0"); return; }
         if (string.IsNullOrWhiteSpace(musicId)) { interactor.Poke("请传 musicId（歌名关键词或平台音乐ID）"); return; }
+        OneBotClient? clientOrNull = GetClient();
+        if (clientOrNull == null) { interactor.Poke("音乐卡片发送失败：QQ客户端不可用"); return; }
+        OneBotClient client = clientOrNull;
+
+        // 平台归一化：只认 6 个平台，其它值按网易云关键词处理（避免把非法 type 丢给协议端报错）
+        string pf = platform.Trim().ToLowerInvariant();
+        if (pf is not ("search" or "163" or "qq" or "kugou" or "migu" or "kuwo"))
+        {
+            logger.LogDebug("未知音乐平台 {Platform}，按 search（网易云关键词）处理", platform);
+            pf = "search";
+        }
+        // 只有网易云系平台能解析出歌曲ID与直链
+        bool ncmFamily = pf is "search" or "163";
+
+        // 样式归一化：只认 163/custom/record（含已废弃的 json 一律按 163）；custom/record 需要网易云歌曲ID与直链，
+        // 非网易云平台一律走原生卡片，ID 原样透传
+        string cfgStyle = (string.IsNullOrWhiteSpace(style) ? Configuration.MusicCardStyle : style).Trim().ToLowerInvariant();
+        if (cfgStyle is not ("163" or "custom" or "record")) cfgStyle = "163";
+        if (!ncmFamily && cfgStyle != "163")
+        {
+            logger.LogDebug("平台 {Platform} 不支持样式 {Style}（该样式只对网易云歌曲生效），本次按原生卡片发送", pf, cfgStyle);
+            cfgStyle = "163";
+        }
 
         bool isGroup = await DetectIsGroupAsync(targetId, type);
 
-        // 配置自愈并入上方 cfgStyle：json样式已失效，按163原生处理（失败时由catch自动回退custom）
-
-        try
+        // 网易云歌曲信息：解析一次，主流程与降级共用（降级不再产生任何额外请求）
+        long ncmId = 0;
+        string songTitle = "", songArtist = "", songCover = "", playUrl = "";
+        bool resolved = false;
+        async Task<bool> ResolveSongAsync()
         {
-            object message;
+            if (resolved) return ncmId != 0;
+            resolved = true;
+            if (ncmId == 0) ncmId = await ResolveNcmIdAsync(pf, musicId);
+            if (ncmId == 0) return false;
+            (songTitle, songArtist, songCover) = await GetNcmSongDetailAsync(ncmId);
+            playUrl = await ResolveNcmUrlAsync(ncmId) ?? "";
+            if (playUrl.Length == 0)
+                playUrl = $"https://music.163.com/song/media/outer/url?id={ncmId}.mp3";
+            return true;
+        }
 
-            if (cfgStyle is "record" or "custom")
+        object BuildCustomCard() => new object[] {
+            new { type = "music", data = new {
+                type = "custom",
+                url = $"https://music.163.com/song?id={ncmId}",
+                audio = playUrl,
+                title = songTitle,
+                content = songArtist,
+                singer = songArtist,
+                image = songCover
+            } }
+        };
+        object BuildRecord() => new object[] { new { type = "record", data = new { file = playUrl } } };
+        async Task<object> BuildNativeCardAsync(string platformType, string cardId)
+        {
+            string signUrl = Configuration.MusicSignUrl?.Trim() ?? "";
+            if (signUrl.Length > 0)
             {
-                // 这两种样式需要网易云歌曲ID（search则先搜）
-                long ncmId = await ResolveNcmIdAsync(platform, musicId);
+                string? signedJson = await SignMusicCardAsync(signUrl, platformType, cardId);
+                if (signedJson != null)
+                    return new object[] { new { type = "json", data = new { data = signedJson } } };
+                logger.LogWarning("插件侧签名服务 {SignUrl} 请求失败，回退为原生 music 段交给协议端处理", signUrl);
+            }
+            return new object[] { new { type = "music", data = new { type = platformType, id = cardId } } };
+        }
+
+        // 发送一次并判定结果：ok=协议端已接受（retcode 0，协议端没回 message_id 也算成功）；
+        // rejected=平台明确拒绝（肯定没送达，可安全降级）；reason="timeout" 表示未收到响应（不确定是否已发出）
+        async Task<(bool ok, bool rejected, string reason)> SendAsync(object message)
+        {
+            object sendParams = isGroup ? new { group_id = targetId, message } : new { user_id = targetId, message };
+            try
+            {
+                SendResult? sent = await client.CallActionAsync<SendResult>("send_msg", sendParams);
+                long sentId = ExtractSentId(sent);
+                if (sentId != 0)
+                    RecordSentMessage(sentId, isGroup ? targetId : 0, isGroup ? 0 : targetId, $"[音乐 {pf}:{musicId}]");
+                return (true, false, "");
+            }
+            catch (TaskCanceledException)
+            {
+                return (false, false, "timeout");
+            }
+            catch (Exception e)
+            {
+                // 框架对 retcode≠0 的固定文案「调用失败 (RetCode: x) - msg」→ 平台明确拒绝，肯定没送达
+                bool rejected = e.Message.Contains("调用失败 (RetCode:", StringComparison.Ordinal);
+                return (false, rejected, e.Message);
+            }
+        }
+
+        const string timeoutHint = "音乐卡片请求超时（10秒未收到协议端响应）。卡片可能稍后出现，请先用 QGetMessages 确认，不要重复发送";
+
+        // ===== 样式 163 / 所有非网易云平台：原生卡片，ID 原样透传 =====
+        if (cfgStyle == "163")
+        {
+            string cardId = musicId.Trim();
+            if (pf == "search")
+            {
+                ncmId = await SearchNetEaseIdAsync(musicId, logger);
                 if (ncmId == 0)
                 {
                     interactor.Poke($"未找到歌曲：{musicId}。可换个更短的关键词重试（只用歌名或只用歌手名），若多次失败说明搜索接口暂时不可用，可稍后再试");
                     return;
                 }
-                if (cfgStyle == "record")
+                cardId = ncmId.ToString();
+            }
+
+            var r1 = await SendAsync(await BuildNativeCardAsync(pf == "search" ? "163" : pf, cardId));
+            if (r1.ok) return;
+            if (r1.reason == "timeout") { interactor.Poke(timeoutHint); return; }
+
+            // 平台明确拒绝才降级；语义不明的异常不重发（可能是已送达但回包异常），避免重复发卡
+            if (r1.rejected && ncmFamily)
+            {
+                logger.LogWarning("原生卡片被协议端拒绝（{Reason}），自动降级 custom 重发", r1.reason);
+                if (await ResolveSongAsync())
                 {
-                    // 保底：直接发语音条（网易云直链，NapCat 自行下载转码，完全不依赖签名，任何端可播）
-                    string? playUrl = await ResolveNcmUrlAsync(ncmId);
-                    if (string.IsNullOrEmpty(playUrl))
+                    var r2 = await SendAsync(BuildCustomCard());
+                    if (r2.ok) return;
+                    if (r2.reason == "timeout") { interactor.Poke(timeoutHint); return; }
+                    if (r2.rejected)
                     {
-                        interactor.Poke("语音条模式需要可用的音乐直链，当前解析失败，请稍后再试或改用默认 163 卡片样式");
+                        logger.LogWarning("custom 卡片也被拒绝（{Reason}），降级语音条重发", r2.reason);
+                        var r3 = await SendAsync(BuildRecord());
+                        if (r3.ok) return;
+                        if (r3.reason == "timeout") { interactor.Poke(timeoutHint); return; }
+                        interactor.Poke($"音乐卡片发送失败：{r3.reason}");
                         return;
                     }
-                    message = new object[] {
-                        new { type = "record", data = new { file = playUrl } }
-                    };
-                }
-                else
-                {
-                    // custom 自定义音乐段：NapCat 本地拼卡不经签名服务；audio 解析失败时用官方 outer 外链兜底
-                    string? playUrl = await ResolveNcmUrlAsync(ncmId);
-                    if (string.IsNullOrEmpty(playUrl))
-                        playUrl = $"https://music.163.com/song/media/outer/url?id={ncmId}.mp3";
-                    var (songTitle, songArtist, songCover) = await GetNcmSongDetailAsync(ncmId);
-                    message = new object[] {
-                        new { type = "music", data = new {
-                            type = "custom",
-                            url = $"https://music.163.com/song?id={ncmId}",
-                            audio = playUrl,
-                            title = songTitle,
-                            content = songArtist,
-                            singer = songArtist,
-                            image = songCover
-                        } }
-                    };
-                }
-            }
-            else
-            {
-                // 163/平台原生卡片：完全复刻 KiraAI 逻辑——插件侧可选签名，否则原样透传
-                string platformType = cfgStyle == "163" && platform == "search" ? "163" : platform.Trim();
-                string cardId;
-                if (platform == "search")
-                {
-                    long ncmId = await SearchNetEaseIdAsync(musicId, logger);
-                    if (ncmId == 0)
-                    {
-                        interactor.Poke($"未找到歌曲：{musicId}。可换个更短的关键词重试（只用歌名或只用歌手名），若多次失败说明搜索接口暂时不可用，可稍后再试");
-                        return;
-                    }
-                    cardId = ncmId.ToString();
-                }
-                else
-                {
-                    cardId = musicId.Trim(); // KiraAI 行为：ID 原样透传，零加工
-                }
-
-                string signUrl = Configuration.MusicSignUrl?.Trim() ?? "";
-                string? signedJson = null;
-                if (signUrl.Length > 0)
-                {
-                    signedJson = await SignMusicCardAsync(signUrl, platformType, cardId);
-                    if (signedJson == null)
-                        logger.LogWarning("插件侧签名服务 {SignUrl} 请求失败，回退为原生 music 段交给 NapCat 处理", signUrl);
-                }
-                message = signedJson != null
-                    ? new object[] { new { type = "json", data = new { data = signedJson } } }
-                    : new object[] { new { type = "music", data = new { type = platformType, id = cardId } } };
-            }
-
-            // 发送：与 KiraAI 完全一致——send_msg，群/私聊由 group_id/user_id 参数推断
-            object sendParams = isGroup
-                ? new { group_id = targetId, message }
-                : new { user_id = targetId, message };
-            logger.LogInformation("音乐卡片发送 payload: {Payload}", JsonSerializer.Serialize(sendParams));
-            SendResult? sent = await client.CallActionAsync<SendResult>("send_msg", sendParams);
-            long sentId = ExtractSentId(sent);
-            if (sentId != 0)
-                RecordSentMessage(sentId, isGroup ? targetId : 0, isGroup ? 0 : targetId, $"[音乐 {platform}:{musicId}]");
-            // 成功静默：不触发AI新一轮确认回复
-        }
-        catch (TaskCanceledException)
-        {
-            // 163原生卡片依赖协议端签名渲染，失败时自动回退custom（免签名本地拼卡），仍失败才提示
-            if (cfgStyle == "163")
-            {
-                logger.LogWarning("163卡片发送超时，自动回退custom样式重发");
-                if (await TrySendCustomMusicCardAsync(platform, musicId, targetId, isGroup))
+                    interactor.Poke($"音乐卡片发送失败：{r2.reason}");
                     return;
+                }
             }
-            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。卡片可能稍后出现；请用 QGetMessages 确认，不要重复发送");
+            interactor.Poke($"音乐卡片发送失败：{r1.reason}");
+            return;
         }
-        catch (Exception e)
-        {
-            // 同上：163失败自动回退custom兜底
-            if (cfgStyle == "163")
-            {
-                logger.LogWarning(e, "163卡片发送失败，自动回退custom样式重发");
-                if (await TrySendCustomMusicCardAsync(platform, musicId, targetId, isGroup))
-                    return;
-            }
-            interactor.Poke($"音乐卡片发送失败：{e.Message}");
-        }
-    }
 
-    /// <summary>custom样式音乐卡片兜底发送（免签名本地拼卡）。成功返回true</summary>
-    private async Task<bool> TrySendCustomMusicCardAsync(string platform, string musicId, long targetId, bool isGroup)
-    {
-        try
+        // ===== 样式 custom / record（仅网易云平台）=====
+        if (!await ResolveSongAsync())
         {
-            OneBotClient? fbClient = GetClient();
-            if (fbClient == null) return false;
-            long ncmId = await ResolveNcmIdAsync(platform, musicId);
-            if (ncmId == 0) return false;
-            string? playUrl = await ResolveNcmUrlAsync(ncmId);
-            if (string.IsNullOrEmpty(playUrl))
-                playUrl = $"https://music.163.com/song/media/outer/url?id={ncmId}.mp3";
-            var (songTitle, songArtist, songCover) = await GetNcmSongDetailAsync(ncmId);
-            object fbMessage = new object[] {
-                new { type = "music", data = new {
-                    type = "custom",
-                    url = $"https://music.163.com/song?id={ncmId}",
-                    audio = playUrl,
-                    title = songTitle,
-                    content = songArtist,
-                    singer = songArtist,
-                    image = songCover
-                } }
-            };
-            object fbParams = isGroup
-                ? new { group_id = targetId, message = fbMessage }
-                : new { user_id = targetId, message = fbMessage };
-            SendResult? fbSent = await fbClient.CallActionAsync<SendResult>("send_msg", fbParams);
-            long fbId = ExtractSentId(fbSent);
-            if (fbId != 0)
-                RecordSentMessage(fbId, isGroup ? targetId : 0, isGroup ? 0 : targetId, $"[音乐 {platform}:{musicId}]");
-            logger.LogInformation("custom兜底卡片发送{Result}", fbId != 0 ? "成功" : "失败（协议端未返回消息ID）");
-            return fbId != 0;
+            interactor.Poke($"未找到歌曲：{musicId}。可换个更短的关键词重试（只用歌名或只用歌手名），若多次失败说明搜索接口暂时不可用，可稍后再试");
+            return;
         }
-        catch (Exception fbEx)
+        var rC = await SendAsync(cfgStyle == "record" ? BuildRecord() : BuildCustomCard());
+        if (rC.ok) return;
+        if (rC.reason == "timeout") { interactor.Poke(timeoutHint); return; }
+        if (rC.rejected && cfgStyle == "custom")
         {
-            logger.LogWarning(fbEx, "custom兜底卡片发送异常");
-            return false;
+            logger.LogWarning("custom 卡片被协议端拒绝（{Reason}），降级语音条重发", rC.reason);
+            var rR = await SendAsync(BuildRecord());
+            if (rR.ok) return;
+            if (rR.reason == "timeout") { interactor.Poke(timeoutHint); return; }
+            interactor.Poke($"音乐卡片发送失败：{rR.reason}");
+            return;
         }
+        interactor.Poke($"音乐卡片发送失败：{rC.reason}");
     }
 
     /// <summary>解析网易云歌曲ID：platform=163且为数字时直用，否则按关键词搜索</summary>
@@ -1997,76 +2023,76 @@ public class QQEnhanceModule(
             else if (noticeType == "group_msg_emoji_like" && Configuration.PerceiveEmojiLike)
             {
                 if (DateTime.Now - _lastEmojiLikePromptTime < NoticeCooldown) return;
-                _lastEmojiLikePromptTime = DateTime.Now;
                 long uid = noticeEvent.UserId;
-                // 用RawJson解析message_id和操作者信息，区分是自己消息还是他人消息
-                bool isOwnMessage = false;
+                // 自己贴的表情不提示自己（与 poke 分支"自己发起的一律无视"对齐）
+                if (uid == noticeEvent.SelfId) return;
+
+                // 被贴消息的归属只查一轮：缓存命中即用；未命中用 get_msg 回查一次；再失败就记一条日志放弃（不重试）
                 long messageId = 0;
-                string operatorName = "";
-                long targetUid = 0;
-                string targetName = "";
-                LiveMessage? lm = null;
-                try
-                {
-                    string? raw = noticeEvent.RawJson;
-                    if (!string.IsNullOrEmpty(raw))
-                    {
-                        using var doc = System.Text.Json.JsonDocument.Parse(raw);
-                        var msgIdEl = doc.RootElement.GetProperty("message_id");
-                        messageId = msgIdEl.ValueKind == System.Text.Json.JsonValueKind.Number ? msgIdEl.GetInt64() : long.Parse(msgIdEl.GetString() ?? "0");
-                        // 对照消息缓存判定是自己还是他人消息
-                        if (_liveById.TryGetValue(messageId, out lm))
-                        {
-                            isOwnMessage = lm.UserId == noticeEvent.SelfId;
-                        }
-                        var opEl = doc.RootElement;
-                        if (opEl.TryGetProperty("user_id", out var uEl))
-                        {
-                            long opId = uEl.ValueKind == System.Text.Json.JsonValueKind.Number ? uEl.GetInt64() : 0;
-                            if (string.IsNullOrEmpty(operatorName))
-                                operatorName = await GetQQUserName(opId, noticeEvent.GroupId);
-                        }
-                    }
-                }
-                catch { }
-                // 未缓存时用get_msg按message_id回查
-                if (!isOwnMessage && messageId != 0 && lm == null)
+                string? rawJson = noticeEvent.RawJson;
+                if (!string.IsNullOrEmpty(rawJson))
                 {
                     try
+                    {
+                        using var doc = System.Text.Json.JsonDocument.Parse(rawJson);
+                        if (doc.RootElement.TryGetProperty("message_id", out var msgIdEl))
+                            messageId = ReadLong(msgIdEl);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogDebug(ex, "贴表情通知 RawJson 解析失败");
+                    }
+                }
+
+                long targetUid = 0;
+                string targetName = "";
+                if (messageId != 0)
+                {
+                    if (_liveById.TryGetValue(messageId, out LiveMessage? lm))
+                    {
+                        targetUid = lm.UserId;
+                        targetName = lm.Nickname;
+                    }
+                    else
                     {
                         OneBotClient? client0 = GetClient();
                         if (client0 != null)
                         {
-                            var resp = await client0.CallActionAsync<System.Text.Json.JsonElement?>("get_msg", new { message_id = messageId });
-                            var je = resp;
-                            if (je != null && je.Value.ValueKind == System.Text.Json.JsonValueKind.Object)
+                            try
                             {
-                                var root = je.Value;
-                                if (root.TryGetProperty("sender", out var sender))
+                                var je = await client0.CallActionAsync<System.Text.Json.JsonElement?>("get_msg", new { message_id = messageId });
+                                if (je.HasValue && je.Value.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                                    je.Value.TryGetProperty("sender", out var sender) && sender.ValueKind == System.Text.Json.JsonValueKind.Object)
                                 {
-                                    if (sender.TryGetProperty("user_id", out var su))
-                                        targetUid = su.ValueKind == System.Text.Json.JsonValueKind.Number ? su.GetInt64() : 0;
-                                    if (sender.TryGetProperty("nickname", out var nn))
-                                        targetName = nn.GetString() ?? "";
+                                    targetUid = ReadPropLong(sender, "user_id");
+                                    targetName = ReadPropString(sender, "nickname");
                                 }
-                                if (targetUid == noticeEvent.SelfId) { isOwnMessage = true; targetName = "我"; }
+                            }
+                            catch (Exception ex)
+                            {
+                                logger.LogDebug(ex, "贴表情通知 get_msg 回查失败 message_id={MessageId}", messageId);
                             }
                         }
                     }
-                    catch { }
                 }
-                bool isOther = !isOwnMessage && uid != noticeEvent.SelfId;
-                if (isOther && !Configuration.PerceiveOthersEmojiLike) return;
-                // 明确解析：谁贴给了谁（含QQ号和昵称）
-                if (isOwnMessage) { targetUid = noticeEvent.SelfId; targetName = "我"; }
-                else if (lm != null) { targetUid = lm.UserId; targetName = lm.Nickname; }
+
+                // 分类：Own=被贴的是自己的消息 / Other=能确证是他人的消息 / 无法判定=查不到作者，静默记日志
+                if (targetUid == 0)
+                {
+                    logger.LogDebug("贴表情通知无法判定被贴消息归属，已忽略：message_id={MessageId} user_id={User}", messageId, uid);
+                    return;
+                }
+                bool isOwnMessage = targetUid == noticeEvent.SelfId;
+                if (!isOwnMessage && !Configuration.PerceiveOthersEmojiLike) return;
+
+                // 通过全部过滤后才占用冷却，避免被抑制的事件把冷却槽吃掉
+                _lastEmojiLikePromptTime = DateTime.Now;
+
+                string operatorName = await GetQQUserName(uid, noticeEvent.GroupId);
+                string opText = string.IsNullOrEmpty(operatorName) ? $"用户{uid}" : $"用户{uid}({operatorName})";
                 string targetText = isOwnMessage
                     ? $"我的消息(我,{noticeEvent.SelfId})"
-                    : (targetUid != 0
-                        ? $"用户{targetUid}({targetName})的消息"
-                        : "某条未缓存的消息");
-                if (uid == noticeEvent.SelfId) operatorName = "我";
-                string opText = operatorName == "我" ? "我" : (string.IsNullOrEmpty(operatorName) ? $"用户{uid}" : $"用户{uid}({operatorName})");
+                    : $"用户{targetUid}({targetName})的消息";
                 interactor.Poke($"[System {opText} 在群 {noticeEvent.GroupId} 给{targetText}贴了表情。可以贴回去（SetEmojiRecent target={uid} targetId={noticeEvent.GroupId}）或接话回应，也可以忽略]");
             }
             else if (noticeType == "group_ban" && Configuration.PerceiveGroupBan)
@@ -2263,6 +2289,8 @@ public class QQEnhanceModule(
             .Replace("{type}", isGroupMsg ? "group" : "private")
             .Replace("{uin}", uin)
             .Replace("{nick}", nick)
+            // {pokeargs} 必须先于 {poke} 替换（虽然 {poke} 带右花括号不会误匹配，但顺序固定更稳）
+            .Replace("{pokeargs}", isGroupMsg ? $"groupId={scope} userId={uin}" : $"userId={uin}")
             .Replace("{poke}", isGroupMsg ? "PokeGroupMember" : "PokePrivateMember");
 
         // 被引用/被@时追加回引建议（不含消息内容，省token）
