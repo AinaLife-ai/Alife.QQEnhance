@@ -2035,8 +2035,16 @@ public class QQEnhanceModule(
                     return;
                 }
 
-                // 只处理自己被戳
-                if (targetId != 0 && targetId != noticeEvent.SelfId) return;
+                // 只处理自己被戳。
+                // 修复误判：target_id==0 时无法确认被戳的是谁——群聊场景其他人互戳也会上报此事件，
+                // 放行会把戳别人的误判为戳bot。协议端（LLBot/NapCat）正常都带 target_id，
+                // 为0视为异常报文，忽略并留日志排查，不再放行
+                if (targetId == 0)
+                {
+                    logger.LogWarning("poke通知缺少 target_id（user_id={User}），无法确认被戳对象，已忽略以避免误判。若此日志频繁出现，说明协议端上报不完整", noticeEvent.UserId);
+                    return;
+                }
+                if (targetId != noticeEvent.SelfId) return;
 
                 // 第二层：回执回声抑制——刚主动戳过此人，短时间内同一人的戳通知视为我方动作的回执而非对方新戳
                 int echoSec = Configuration.PokeEchoSuppressSeconds;
