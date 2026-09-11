@@ -55,12 +55,12 @@ public class QQEnhanceConfig
     public bool GroupBanEnabled { get; set; } = true;
 
     [DisplayName("音乐卡片")]
-    [Description("启用发送音乐卡片功能（默认网易云官方卡片，全端可播放，不会出现\"版本过低\"）")]
+    [Description("启用发送音乐卡片功能（默认custom自定义卡片，免签名本地渲染，全端可播放）")]
     public bool MusicCardEnabled { get; set; } = true;
 
     [DisplayName("音乐卡片样式")]
-    [Description("163=网易云官方卡片（NapCat本地渲染，与KiraAI同逻辑，推荐）；custom=自定义音乐段（免签名，字段本地渲染）；record=直接发语音条（网易云直链保底，任何端可播）；json=已废弃（依赖的公共签名服务已关停），配置为json会自动按163发送")]
-    public string MusicCardStyle { get; set; } = "163";
+    [Description("custom=自定义音乐段（免签名，协议端本地拼卡，不依赖签名服务，推荐，兼容NapCat/LLBot等）；163=网易云官方卡片（依赖NapCat签名，LLBot等协议端未实现签名会发送失败）；record=直接发语音条（网易云直链保底，任何端可播）；json=已废弃（依赖的公共签名服务已关停），配置为json会自动按163发送")]
+    public string MusicCardStyle { get; set; } = "custom";
 
     [DisplayName("音乐签名服务地址")]
     [Description("可选。填入后由插件直接完成卡片签名再发送，不再依赖NapCat的musicSignUrl配置（NapCat默认用 ss.xingzhige.com 公共签名，该服务不稳定或卡片版本过期时接收方会显示\"发送者版本过低\"）。例如自建或第三方签名服务地址。留空=交给NapCat处理")]
@@ -114,6 +114,10 @@ public class QQEnhanceConfig
     [DisplayName("被贴表情感知")]
     [Description("感知群消息被贴表情并提示AI（走官方连接事件，无需额外上报），默认关闭")]
     public bool PerceiveEmojiLike { get; set; } = false;
+
+    [DisplayName("他人消息贴表情感知")]
+    [Description("感知他人消息被贴表情时也推送（需开启被贴表情感知），默认开启")]
+    public bool PerceiveOthersEmojiLike { get; set; } = true;
 
     [DisplayName("引用回复")]
     [Description("启用引用回复消息功能")]
@@ -1534,9 +1538,13 @@ public class QQEnhanceModule(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("消息类型：private或group，可省略，省略时自动判定")] string type = "",
         [Description("音乐平台：search=关键词搜索网易云（推荐）/163=网易云歌曲ID/qq/kugou/migu/kuwo=对应平台原生ID")] string platform = "search",
-        [Description("歌曲关键词（platform=search时）或平台音乐ID（其他platform时原样透传，不做任何转换）")] string musicId = "")
+        [Description("歌曲关键词（platform=search时）或平台音乐ID（其他platform时原样透传，不做任何转换）")] string musicId = "",
+        [Description("卡片样式（可选）：custom=免签名自定义卡片（协议端不支持签名时的可靠兜底）/record=语音条/163等=原生卡片（默认，走配置）。仅对网易云歌曲生效")] string style = "")
     {
         if (!Configuration.MusicCardEnabled) { interactor.Poke("音乐卡片功能已禁用"); return; }
+        // style参数仅对网易云生效：指定了就覆盖配置默认值；json样式已失效按163处理
+        string cfgStyle = string.IsNullOrWhiteSpace(style) ? Configuration.MusicCardStyle?.Trim() ?? "163" : style.Trim().ToLowerInvariant();
+        if (cfgStyle is not ("163" or "custom" or "record")) cfgStyle = "163";
         OneBotClient? client = GetClient();
         if (client == null) { interactor.Poke("音乐卡片发送失败：QQ客户端不可用"); return; }
         if (targetId == 0) { interactor.Poke("targetId不能为0"); return; }
@@ -1544,19 +1552,13 @@ public class QQEnhanceModule(
 
         bool isGroup = await DetectIsGroupAsync(targetId, type);
 
-        // 配置自愈：json样式依赖的结构卡必须签名，公共签名已关停——旧配置自动按163处理
-        string style = Configuration.MusicCardStyle;
-        if (style == "json")
-        {
-            logger.LogWarning("音乐卡片样式 json 依赖的签名服务已失效，本次自动按 163 发送；建议在插件配置中把样式改为 163");
-            style = "163";
-        }
+        // 配置自愈并入上方 cfgStyle：json样式已失效，按163原生处理（失败时由catch自动回退custom）
 
         try
         {
             object message;
 
-            if (style is "record" or "custom")
+            if (cfgStyle is "record" or "custom")
             {
                 // 这两种样式需要网易云歌曲ID（search则先搜）
                 long ncmId = await ResolveNcmIdAsync(platform, musicId);
@@ -1565,7 +1567,7 @@ public class QQEnhanceModule(
                     interactor.Poke($"未找到歌曲：{musicId}。可换个更短的关键词重试（只用歌名或只用歌手名），若多次失败说明搜索接口暂时不可用，可稍后再试");
                     return;
                 }
-                if (style == "record")
+                if (cfgStyle == "record")
                 {
                     // 保底：直接发语音条（网易云直链，NapCat 自行下载转码，完全不依赖签名，任何端可播）
                     string? playUrl = await ResolveNcmUrlAsync(ncmId);
@@ -1601,7 +1603,7 @@ public class QQEnhanceModule(
             else
             {
                 // 163/平台原生卡片：完全复刻 KiraAI 逻辑——插件侧可选签名，否则原样透传
-                string platformType = platform == "search" ? "163" : platform.Trim();
+                string platformType = cfgStyle == "163" && platform == "search" ? "163" : platform.Trim();
                 string cardId;
                 if (platform == "search")
                 {
@@ -1644,11 +1646,66 @@ public class QQEnhanceModule(
         }
         catch (TaskCanceledException)
         {
-            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。NapCat签名较慢时可能仍在后台处理，卡片可能稍后出现；请用 QGetMessages 确认，不要重复发送");
+            // 163原生卡片依赖协议端签名渲染，失败时自动回退custom（免签名本地拼卡），仍失败才提示
+            if (cfgStyle == "163")
+            {
+                logger.LogWarning("163卡片发送超时，自动回退custom样式重发");
+                if (await TrySendCustomMusicCardAsync(platform, musicId, targetId, isGroup))
+                    return;
+            }
+            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。卡片可能稍后出现；请用 QGetMessages 确认，不要重复发送");
         }
         catch (Exception e)
         {
+            // 同上：163失败自动回退custom兜底
+            if (cfgStyle == "163")
+            {
+                logger.LogWarning(e, "163卡片发送失败，自动回退custom样式重发");
+                if (await TrySendCustomMusicCardAsync(platform, musicId, targetId, isGroup))
+                    return;
+            }
             interactor.Poke($"音乐卡片发送失败：{e.Message}");
+        }
+    }
+
+    /// <summary>custom样式音乐卡片兜底发送（免签名本地拼卡）。成功返回true</summary>
+    private async Task<bool> TrySendCustomMusicCardAsync(string platform, string musicId, long targetId, bool isGroup)
+    {
+        try
+        {
+            OneBotClient? fbClient = GetClient();
+            if (fbClient == null) return false;
+            long ncmId = await ResolveNcmIdAsync(platform, musicId);
+            if (ncmId == 0) return false;
+            string? playUrl = await ResolveNcmUrlAsync(ncmId);
+            if (string.IsNullOrEmpty(playUrl))
+                playUrl = $"https://music.163.com/song/media/outer/url?id={ncmId}.mp3";
+            var (songTitle, songArtist, songCover) = await GetNcmSongDetailAsync(ncmId);
+            object fbMessage = new object[] {
+                new { type = "music", data = new {
+                    type = "custom",
+                    url = $"https://music.163.com/song?id={ncmId}",
+                    audio = playUrl,
+                    title = songTitle,
+                    content = songArtist,
+                    singer = songArtist,
+                    image = songCover
+                } }
+            };
+            object fbParams = isGroup
+                ? new { group_id = targetId, message = fbMessage }
+                : new { user_id = targetId, message = fbMessage };
+            SendResult? fbSent = await fbClient.CallActionAsync<SendResult>("send_msg", fbParams);
+            long fbId = ExtractSentId(fbSent);
+            if (fbId != 0)
+                RecordSentMessage(fbId, isGroup ? targetId : 0, isGroup ? 0 : targetId, $"[音乐 {platform}:{musicId}]");
+            logger.LogInformation("custom兜底卡片发送{Result}", fbId != 0 ? "成功" : "失败（协议端未返回消息ID）");
+            return fbId != 0;
+        }
+        catch (Exception fbEx)
+        {
+            logger.LogWarning(fbEx, "custom兜底卡片发送异常");
+            return false;
         }
     }
 
@@ -1942,7 +1999,75 @@ public class QQEnhanceModule(
                 if (DateTime.Now - _lastEmojiLikePromptTime < NoticeCooldown) return;
                 _lastEmojiLikePromptTime = DateTime.Now;
                 long uid = noticeEvent.UserId;
-                interactor.Poke($"[System 用户{uid} 在群 {noticeEvent.GroupId} 给你的消息贴了表情。可以贴回去（SetEmojiRecent target={uid} targetId={noticeEvent.GroupId}）或接话回应，也可以忽略]");
+                // 用RawJson解析message_id和操作者信息，区分是自己消息还是他人消息
+                bool isOwnMessage = false;
+                long messageId = 0;
+                string operatorName = "";
+                long targetUid = 0;
+                string targetName = "";
+                LiveMessage? lm = null;
+                try
+                {
+                    string? raw = noticeEvent.RawJson;
+                    if (!string.IsNullOrEmpty(raw))
+                    {
+                        using var doc = System.Text.Json.JsonDocument.Parse(raw);
+                        var msgIdEl = doc.RootElement.GetProperty("message_id");
+                        messageId = msgIdEl.ValueKind == System.Text.Json.JsonValueKind.Number ? msgIdEl.GetInt64() : long.Parse(msgIdEl.GetString() ?? "0");
+                        // 对照消息缓存判定是自己还是他人消息
+                        if (_liveById.TryGetValue(messageId, out lm))
+                        {
+                            isOwnMessage = lm.UserId == noticeEvent.SelfId;
+                        }
+                        var opEl = doc.RootElement;
+                        if (opEl.TryGetProperty("user_id", out var uEl))
+                        {
+                            long opId = uEl.ValueKind == System.Text.Json.JsonValueKind.Number ? uEl.GetInt64() : 0;
+                            if (string.IsNullOrEmpty(operatorName))
+                                operatorName = await GetQQUserName(opId, noticeEvent.GroupId);
+                        }
+                    }
+                }
+                catch { }
+                // 未缓存时用get_msg按message_id回查
+                if (!isOwnMessage && messageId != 0 && lm == null)
+                {
+                    try
+                    {
+                        OneBotClient? client0 = GetClient();
+                        if (client0 != null)
+                        {
+                            var resp = await client0.CallActionAsync<System.Text.Json.JsonElement?>("get_msg", new { message_id = messageId });
+                            var je = resp;
+                            if (je != null && je.Value.ValueKind == System.Text.Json.JsonValueKind.Object)
+                            {
+                                var root = je.Value;
+                                if (root.TryGetProperty("sender", out var sender))
+                                {
+                                    if (sender.TryGetProperty("user_id", out var su))
+                                        targetUid = su.ValueKind == System.Text.Json.JsonValueKind.Number ? su.GetInt64() : 0;
+                                    if (sender.TryGetProperty("nickname", out var nn))
+                                        targetName = nn.GetString() ?? "";
+                                }
+                                if (targetUid == noticeEvent.SelfId) { isOwnMessage = true; targetName = "我"; }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+                bool isOther = !isOwnMessage && uid != noticeEvent.SelfId;
+                if (isOther && !Configuration.PerceiveOthersEmojiLike) return;
+                // 明确解析：谁贴给了谁（含QQ号和昵称）
+                if (isOwnMessage) { targetUid = noticeEvent.SelfId; targetName = "我"; }
+                else if (lm != null) { targetUid = lm.UserId; targetName = lm.Nickname; }
+                string targetText = isOwnMessage
+                    ? $"我的消息(我,{noticeEvent.SelfId})"
+                    : (targetUid != 0
+                        ? $"用户{targetUid}({targetName})的消息"
+                        : "某条未缓存的消息");
+                if (uid == noticeEvent.SelfId) operatorName = "我";
+                string opText = operatorName == "我" ? "我" : (string.IsNullOrEmpty(operatorName) ? $"用户{uid}" : $"用户{uid}({operatorName})");
+                interactor.Poke($"[System {opText} 在群 {noticeEvent.GroupId} 给{targetText}贴了表情。可以贴回去（SetEmojiRecent target={uid} targetId={noticeEvent.GroupId}）或接话回应，也可以忽略]");
             }
             else if (noticeType == "group_ban" && Configuration.PerceiveGroupBan)
             {
@@ -1982,8 +2107,16 @@ public class QQEnhanceModule(
                     return;
                 }
 
-                // 只处理自己被戳
-                if (targetId != 0 && targetId != noticeEvent.SelfId) return;
+                // 只处理自己被戳。
+                // 修复误判：target_id==0 时无法确认被戳的是谁——群聊场景其他人互戳也会上报此事件，
+                // 放行会把戳别人的误判为戳bot。协议端（LLBot/NapCat）正常都带 target_id，
+                // 为0视为异常报文，忽略并留日志排查，不再放行
+                if (targetId == 0)
+                {
+                    logger.LogWarning("poke通知缺少 target_id（user_id={User}），无法确认被戳对象，已忽略以避免误判。若此日志频繁出现，说明协议端上报不完整", noticeEvent.UserId);
+                    return;
+                }
+                if (targetId != noticeEvent.SelfId) return;
 
                 // 第二层：回执回声抑制——刚主动戳过此人，短时间内同一人的戳通知视为我方动作的回执而非对方新戳
                 int echoSec = Configuration.PokeEchoSuppressSeconds;
