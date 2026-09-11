@@ -1544,19 +1544,13 @@ public class QQEnhanceModule(
 
         bool isGroup = await DetectIsGroupAsync(targetId, type);
 
-        // 配置自愈：json样式依赖的结构卡必须签名，公共签名已关停——旧配置自动按163处理
-        string style = Configuration.MusicCardStyle;
-        if (style == "json")
-        {
-            logger.LogWarning("音乐卡片样式 json 依赖的签名服务已失效，本次自动按 custom 发送；建议在插件配置中把样式改为 custom");
-            style = "custom";
-        }
+        // 配置自愈并入上方 cfgStyle：json样式已失效，按163原生处理（失败时由catch自动回退custom）
 
         try
         {
             object message;
 
-            if (style is "record" or "custom")
+            if (cfgStyle is "record" or "custom")
             {
                 // 这两种样式需要网易云歌曲ID（search则先搜）
                 long ncmId = await ResolveNcmIdAsync(platform, musicId);
@@ -1565,7 +1559,7 @@ public class QQEnhanceModule(
                     interactor.Poke($"未找到歌曲：{musicId}。可换个更短的关键词重试（只用歌名或只用歌手名），若多次失败说明搜索接口暂时不可用，可稍后再试");
                     return;
                 }
-                if (style == "record")
+                if (cfgStyle == "record")
                 {
                     // 保底：直接发语音条（网易云直链，NapCat 自行下载转码，完全不依赖签名，任何端可播）
                     string? playUrl = await ResolveNcmUrlAsync(ncmId);
@@ -1601,7 +1595,7 @@ public class QQEnhanceModule(
             else
             {
                 // 163/平台原生卡片：完全复刻 KiraAI 逻辑——插件侧可选签名，否则原样透传
-                string platformType = platform == "search" ? "163" : platform.Trim();
+                string platformType = cfgStyle == "163" && platform == "search" ? "163" : platform.Trim();
                 string cardId;
                 if (platform == "search")
                 {
@@ -1644,11 +1638,66 @@ public class QQEnhanceModule(
         }
         catch (TaskCanceledException)
         {
-            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。NapCat签名较慢时可能仍在后台处理，卡片可能稍后出现；请用 QGetMessages 确认，不要重复发送");
+            // 163原生卡片依赖协议端签名渲染，失败时自动回退custom（免签名本地拼卡），仍失败才提示
+            if (cfgStyle == "163")
+            {
+                logger.LogWarning("163卡片发送超时，自动回退custom样式重发");
+                if (await TrySendCustomMusicCardAsync(platform, musicId, targetId, isGroup))
+                    return;
+            }
+            interactor.Poke("音乐卡片请求超时（10秒未收到OneBot响应）。卡片可能稍后出现；请用 QGetMessages 确认，不要重复发送");
         }
         catch (Exception e)
         {
+            // 同上：163失败自动回退custom兜底
+            if (cfgStyle == "163")
+            {
+                logger.LogWarning(e, "163卡片发送失败，自动回退custom样式重发");
+                if (await TrySendCustomMusicCardAsync(platform, musicId, targetId, isGroup))
+                    return;
+            }
             interactor.Poke($"音乐卡片发送失败：{e.Message}");
+        }
+    }
+
+    /// <summary>custom样式音乐卡片兜底发送（免签名本地拼卡）。成功返回true</summary>
+    private async Task<bool> TrySendCustomMusicCardAsync(string platform, string musicId, long targetId, bool isGroup)
+    {
+        try
+        {
+            OneBotClient? fbClient = GetClient();
+            if (fbClient == null) return false;
+            long ncmId = await ResolveNcmIdAsync(platform, musicId);
+            if (ncmId == 0) return false;
+            string? playUrl = await ResolveNcmUrlAsync(ncmId);
+            if (string.IsNullOrEmpty(playUrl))
+                playUrl = $"https://music.163.com/song/media/outer/url?id={ncmId}.mp3";
+            var (songTitle, songArtist, songCover) = await GetNcmSongDetailAsync(ncmId);
+            object fbMessage = new object[] {
+                new { type = "music", data = new {
+                    type = "custom",
+                    url = $"https://music.163.com/song?id={ncmId}",
+                    audio = playUrl,
+                    title = songTitle,
+                    content = songArtist,
+                    singer = songArtist,
+                    image = songCover
+                } }
+            };
+            object fbParams = isGroup
+                ? new { group_id = targetId, message = fbMessage }
+                : new { user_id = targetId, message = fbMessage };
+            SendResult? fbSent = await fbClient.CallActionAsync<SendResult>("send_msg", fbParams);
+            long fbId = ExtractSentId(fbSent);
+            if (fbId != 0)
+                RecordSentMessage(fbId, isGroup ? targetId : 0, isGroup ? 0 : targetId, $"[音乐 {platform}:{musicId}]");
+            logger.LogInformation("custom兜底卡片发送{Result}", fbId != 0 ? "成功" : "失败（协议端未返回消息ID）");
+            return fbId != 0;
+        }
+        catch (Exception fbEx)
+        {
+            logger.LogWarning(fbEx, "custom兜底卡片发送异常");
+            return false;
         }
     }
 
