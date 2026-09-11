@@ -55,12 +55,12 @@ public class QQEnhanceConfig
     public bool GroupBanEnabled { get; set; } = true;
 
     [DisplayName("音乐卡片")]
-    [Description("启用发送音乐卡片功能（默认网易云官方卡片，全端可播放，不会出现\"版本过低\"）")]
+    [Description("启用发送音乐卡片功能（默认custom自定义卡片，免签名本地渲染，全端可播放）")]
     public bool MusicCardEnabled { get; set; } = true;
 
     [DisplayName("音乐卡片样式")]
-    [Description("163=网易云官方卡片（NapCat本地渲染，与KiraAI同逻辑，推荐）；custom=自定义音乐段（免签名，字段本地渲染）；record=直接发语音条（网易云直链保底，任何端可播）；json=已废弃（依赖的公共签名服务已关停），配置为json会自动按163发送")]
-    public string MusicCardStyle { get; set; } = "163";
+    [Description("custom=自定义音乐段（免签名，协议端本地拼卡，不依赖签名服务，推荐，兼容NapCat/LLBot等）；163=网易云官方卡片（依赖NapCat签名，LLBot等协议端未实现签名会发送失败）；record=直接发语音条（网易云直链保底，任何端可播）；json=已废弃（依赖的公共签名服务已关停），配置为json会自动按163发送")]
+    public string MusicCardStyle { get; set; } = "custom";
 
     [DisplayName("音乐签名服务地址")]
     [Description("可选。填入后由插件直接完成卡片签名再发送，不再依赖NapCat的musicSignUrl配置（NapCat默认用 ss.xingzhige.com 公共签名，该服务不稳定或卡片版本过期时接收方会显示\"发送者版本过低\"）。例如自建或第三方签名服务地址。留空=交给NapCat处理")]
@@ -1548,8 +1548,8 @@ public class QQEnhanceModule(
         string style = Configuration.MusicCardStyle;
         if (style == "json")
         {
-            logger.LogWarning("音乐卡片样式 json 依赖的签名服务已失效，本次自动按 163 发送；建议在插件配置中把样式改为 163");
-            style = "163";
+            logger.LogWarning("音乐卡片样式 json 依赖的签名服务已失效，本次自动按 custom 发送；建议在插件配置中把样式改为 custom");
+            style = "custom";
         }
 
         try
