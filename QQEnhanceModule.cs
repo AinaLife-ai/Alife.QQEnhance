@@ -967,6 +967,49 @@ public class QQEnhanceModule(
     private const string EmojiIdTable =
         "201=点赞 264=捂脸 182=笑哭 271=吃瓜 270=emm 179=doge 269=暗中观察 273=我酸了 272=呵呵哒 222=抱抱 227=拍手 246=加油抱抱 116=示爱 122=爱你 214=啵啵 219=蹭一蹭 111=可怜 106=委屈 173=泪奔 262=脑阔疼 268=问号脸 265=辣眼睛 266=哦哟 267=头秃 277=汪汪 278=汗 281=无眼笑 282=敬礼 284=面无表情 285=摸鱼 287=哦 289=睁眼 104=哈欠 109=左亲亲 118=抱拳 120=拳头 123=NO 124=OK 125=转圈 129=挥手 144=喝彩 147=棒棒糖 171=茶 174=无奈 175=卖萌 176=小纠结 180=惊喜 181=骚扰 183=我最美 203=托脸 212=托腮 232=佛系 240=喷脸 243=甩头";
 
+    /// <summary>表情ID → 描述（由 EmojiIdTable 解析，供贴表情通知渲染；未收录的返回空串）</summary>
+    private static readonly Dictionary<long, string> EmojiDescriptions = ParseEmojiDescriptions(EmojiIdTable);
+
+    /// <summary>解析 "201=点赞 264=捂脸 ..." 形式的表情对照表</summary>
+    private static Dictionary<long, string> ParseEmojiDescriptions(string table)
+    {
+        var map = new Dictionary<long, string>();
+        foreach (string part in table.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int eq = part.IndexOf('=');
+            if (eq <= 0) continue;
+            if (long.TryParse(part.AsSpan(0, eq), out long id))
+                map[id] = part[(eq + 1)..];
+        }
+        return map;
+    }
+
+    /// <summary>渲染表情编号：对照表内能查到描述时显示「编号（描述）」，否则只显示编号</summary>
+    private static string DescribeEmojiId(long id, long count = 1)
+    {
+        string body = EmojiDescriptions.TryGetValue(id, out string? desc) && !string.IsNullOrEmpty(desc)
+            ? $"{id}（{desc}）"
+            : id.ToString();
+        return count > 1 ? $"{body}×{count}" : body;
+    }
+
+    /// <summary>从通知原文的 likes 数组渲染贴的表情（如「264（捂脸）」「12345」；多个用、连接，最多5个）</summary>
+    private static string RenderLikes(JsonElement root)
+    {
+        if (!root.TryGetProperty("likes", out var likesEl) || likesEl.ValueKind != JsonValueKind.Array)
+            return "";
+        var texts = new List<string>();
+        foreach (JsonElement like in likesEl.EnumerateArray())
+        {
+            if (like.ValueKind != JsonValueKind.Object) continue;
+            long eid = ReadPropLong(like, "emoji_id");
+            if (eid == 0) continue;
+            texts.Add(DescribeEmojiId(eid, Math.Max(1, ReadPropLong(like, "count"))));
+            if (texts.Count >= 5) break;   // 防刷屏
+        }
+        return string.Join("、", texts);
+    }
+
     [XmlFunction(FunctionMode.OneShot)]
     [Description("给QQ消息贴表情回应（一步到位，无需先查ID，仅群聊消息可贴，私聊平台不支持）。看到有趣/赞同/暖心/好笑的消息随手贴一个（常用：201=点赞 264=捂脸 182=笑哭 271=吃瓜 270=emm 179=doge 269=暗中观察 273=我酸了 272=呵呵哒 222=抱抱 227=拍手 246=加油抱抱 116=示爱 122=爱你 214=啵啵 219=蹭一蹭 111=可怜 106=委屈 173=泪奔 262=脑阔疼 268=问号脸 265=辣眼睛，更多可传 emojiId=0 查看完整对照表再选），这是真人最轻量的互动方式，不需要说话就可以直接贴。两种用法：1) 默认贴 target 的最近一条（index 可指定倒数第N条）；2) 已知真实消息ID时直接传 messageId（必须来自 QGetMessages 或撤回列表，严禁编造）")]
     public async Task SetEmojiRecent(
@@ -1569,7 +1612,7 @@ public class QQEnhanceModule(
         [Description("消息类型：private或group，可省略，省略时自动判定")] string type = "",
         [Description("音乐平台：search=关键词搜索网易云（推荐）/163=网易云歌曲ID/qq/kugou/migu/kuwo=对应平台原生ID")] string platform = "search",
         [Description("歌曲关键词（platform=search时）或平台音乐ID（其他platform时原样透传，不做任何转换）")] string musicId = "",
-        [Description("卡片样式（可选）：custom=自定义卡片/record=语音条/163=原生卡片；省略则用配置默认值。仅对网易云歌曲（platform=search/163）生效，其它平台一律原生卡片")] string style = "")
+        [Description("卡片样式（可选）：custom=自定义卡片/record=语音条/163=原生卡片；省略则用配置默认值。仅对网易云歌曲（platform=search/163）生效，其它平台一律原生卡片。注：custom/163 是否走协议端签名服务由协议端决定（失败会自动降级），record 语音条不依赖签名")] string style = "")
     {
         if (!Configuration.MusicCardEnabled) { interactor.Poke("音乐卡片功能已禁用"); return; }
         if (targetId == 0) { interactor.Poke("targetId不能为0"); return; }
@@ -1578,13 +1621,22 @@ public class QQEnhanceModule(
         if (clientOrNull == null) { interactor.Poke("音乐卡片发送失败：QQ客户端不可用"); return; }
         OneBotClient client = clientOrNull;
 
-        // 平台归一化：只认 6 个平台，其它值按网易云关键词处理（避免把非法 type 丢给协议端报错）
-        string pf = platform.Trim().ToLowerInvariant();
-        if (pf is not ("search" or "163" or "qq" or "kugou" or "migu" or "kuwo"))
+        // 平台归一化（只做便利化，不改变调用者意图）：
+        //  1) 别名/大小写/空格统一：网易云|netease|wy|wyy 视为网易云系；qq音乐→qq、酷狗→kugou、酷我→kuwo、咪咕→migu
+        //  2) 网易云系按 musicId 形态细分：纯数字视为歌曲ID直用，否则按关键词搜索（与 ResolveNcmIdAsync 既有口径一致）
+        //  3) 完全无法识别时同样按网易云处理，避免把非法 type 丢给协议端报错
+        string rawPlatform = platform.Trim().ToLowerInvariant();
+        string pf = rawPlatform switch
         {
-            logger.LogDebug("未知音乐平台 {Platform}，按 search（网易云关键词）处理", platform);
-            pf = "search";
-        }
+            "qq" or "qq音乐" or "qqmusic" => "qq",
+            "kugou" or "酷狗" => "kugou",
+            "kuwo" or "酷我" => "kuwo",
+            "migu" or "咪咕" => "migu",
+            _ => long.TryParse(musicId.Trim(), out _) ? "163" : "search",
+        };
+        if (rawPlatform is not ("" or "search" or "163" or "网易云" or "netease" or "wy" or "wyy"
+            or "qq" or "qq音乐" or "qqmusic" or "kugou" or "酷狗" or "kuwo" or "酷我" or "migu" or "咪咕"))
+            logger.LogDebug("未识别的音乐平台 {Platform}，按网易云处理（musicId 为纯数字则视为歌曲ID，否则按关键词搜索）", platform);
         // 只有网易云系平台能解析出歌曲ID与直链
         bool ncmFamily = pf is "search" or "163";
 
@@ -1611,9 +1663,9 @@ public class QQEnhanceModule(
             if (ncmId == 0) ncmId = await ResolveNcmIdAsync(pf, musicId);
             if (ncmId == 0) return false;
             (songTitle, songArtist, songCover) = await GetNcmSongDetailAsync(ncmId);
-            playUrl = await ResolveNcmUrlAsync(ncmId) ?? "";
-            if (playUrl.Length == 0)
-                playUrl = $"https://music.163.com/song/media/outer/url?id={ncmId}.mp3";
+            // audio 一律使用网易云 outer 外链（实测最稳：302 到实际音频，协议端本地下载不受防盗链/过期影响）。
+            // 第三方解析出的直链常有防盗链/过期问题（卡片能出但播放失败），因此不再用于 audio 字段。
+            playUrl = NeteaseOuterUrl(ncmId);
             return true;
         }
 
@@ -1691,6 +1743,7 @@ public class QQEnhanceModule(
             // 平台明确拒绝才降级；语义不明的异常不重发（可能是已送达但回包异常），避免重复发卡
             if (r1.rejected && ncmFamily)
             {
+                // 163 被拒时优先降级 custom（部分协议端对 163 依赖签名服务、直接抛错）
                 logger.LogWarning("原生卡片被协议端拒绝（{Reason}），自动降级 custom 重发", r1.reason);
                 if (await ResolveSongAsync())
                 {
@@ -1876,7 +1929,11 @@ public class QQEnhanceModule(
     }
 
 
-    /// <summary>网易云歌曲ID → 直链（仅供 record/custom 样式使用：meting type=url 优先，vkeys 兜底）</summary>
+    /// <summary>网易云歌曲ID → 官方 outer 播放外链（302 到实际音频；协议端本地下载，不依赖第三方解析服务）</summary>
+    private static string NeteaseOuterUrl(long id) => $"https://music.163.com/song/media/outer/url?id={id}.mp3";
+
+    /// <summary>旧：网易云歌曲ID → 第三方解析直链（已被 outer 外链取代，保留供参考/回退，当前无调用点）</summary>
+    [Obsolete("改用 NeteaseOuterUrl（outer 外链更稳）")]
     private static async Task<string?> ResolveNcmUrlAsync(long id)
     {
         try
@@ -1955,9 +2012,10 @@ public class QQEnhanceModule(
         {
             count = Math.Clamp(count, 1, 50);
 
+            // 不过滤已撤回：与撤回候选列表口径一致——已撤回条目保留内容存档并标注【已撤回】，
+            // 供 AI 回溯"刚撤的是哪条"；误操作由各功能自身的 IsRecalled 守卫拦下（会明确提示不能操作）
             List<LiveMessage> Query() => _liveMessages
                 .Where(m => groupId != 0 ? m.GroupId == groupId : (m.GroupId == 0 && m.PeerId == userId))
-                .Where(NotRecalled)
                 .OrderByDescending(m => m.Time)
                 .ThenByDescending(m => m.Seq)
                 .Take(count)
@@ -2026,9 +2084,14 @@ public class QQEnhanceModule(
                 long uid = noticeEvent.UserId;
                 // 自己贴的表情不提示自己（与 poke 分支"自己发起的一律无视"对齐）
                 if (uid == noticeEvent.SelfId) return;
+                // 部分协议端（如 SnowLuma）额外用 sub_type 区分添加/移除表情回应，NapCat 不发该字段（恒视为添加）。
+                // 取消回应不是新互动，不注入提示、也不占用冷却
+                if (string.Equals(noticeEvent.SubType, "remove", StringComparison.OrdinalIgnoreCase)) return;
 
                 // 被贴消息的归属只查一轮：缓存命中即用；未命中用 get_msg 回查一次；再失败就记一条日志放弃（不重试）
                 long messageId = 0;
+                long likeId = 0;          // 第一个表情的编号（提示 AI 可贴回同一个；取不到时用默认201）
+                string likeText = "";
                 string? rawJson = noticeEvent.RawJson;
                 if (!string.IsNullOrEmpty(rawJson))
                 {
@@ -2037,6 +2100,13 @@ public class QQEnhanceModule(
                         using var doc = System.Text.Json.JsonDocument.Parse(rawJson);
                         if (doc.RootElement.TryGetProperty("message_id", out var msgIdEl))
                             messageId = ReadLong(msgIdEl);
+                        likeText = RenderLikes(doc.RootElement);
+                        if (doc.RootElement.TryGetProperty("likes", out var likesEl2) && likesEl2.ValueKind == System.Text.Json.JsonValueKind.Array)
+                            foreach (JsonElement lk in likesEl2.EnumerateArray())
+                            {
+                                long first = ReadPropLong(lk, "emoji_id");
+                                if (first != 0) { likeId = first; break; }
+                            }
                     }
                     catch (Exception ex)
                     {
@@ -2088,12 +2158,18 @@ public class QQEnhanceModule(
                 // 通过全部过滤后才占用冷却，避免被抑制的事件把冷却槽吃掉
                 _lastEmojiLikePromptTime = DateTime.Now;
 
-                string operatorName = await GetQQUserName(uid, noticeEvent.GroupId);
-                string opText = string.IsNullOrEmpty(operatorName) ? $"用户{uid}" : $"用户{uid}({operatorName})";
+                string operatorName = uid == 0 ? "" : await GetQQUserName(uid, noticeEvent.GroupId);
+                string opText = uid == 0 ? "某位用户" : (string.IsNullOrEmpty(operatorName) ? $"用户{uid}" : $"用户{uid}({operatorName})");
                 string targetText = isOwnMessage
                     ? $"我的消息(我,{noticeEvent.SelfId})"
                     : $"用户{targetUid}({targetName})的消息";
-                interactor.Poke($"[System {opText} 在群 {noticeEvent.GroupId} 给{targetText}贴了表情。可以贴回去（SetEmojiRecent target={uid} targetId={noticeEvent.GroupId}）或接话回应，也可以忽略]");
+                string likePart = likeText.Length > 0 ? $"贴了表情：{likeText}" : "贴了表情";
+                // likeId=0 时不能传 emojiId（SetEmojiRecent 里 emojiId=0 是"查对照表"的语义）；
+                // 措辞不指定"贴回同一个"：只给出可用参数并提示可以换个 emojiId，具体怎么回应交给 AI
+                string backArgs = likeId != 0
+                    ? $"SetEmojiRecent target={uid} targetId={noticeEvent.GroupId} emojiId={likeId}，或换个别的 emojiId"
+                    : $"SetEmojiRecent target={uid} targetId={noticeEvent.GroupId}，或换个别的 emojiId";
+                interactor.Poke($"[System {opText} 在群 {noticeEvent.GroupId} 给{targetText}{likePart}。想回应的话可以贴回表情（{backArgs}）、说句话，也可以忽略]");
             }
             else if (noticeType == "group_ban" && Configuration.PerceiveGroupBan)
             {
@@ -2240,13 +2316,21 @@ public class QQEnhanceModule(
         {
             if (groupId != 0)
             {
-                var sender = await client.CallActionAsync<OneBotSender>(
-                    "get_group_member_info",
-                    new { group_id = groupId, user_id = userId, no_cache = false });
-                if (sender != null)
+                try
                 {
-                    if (!string.IsNullOrEmpty(sender.Card)) return sender.Card;
-                    if (!string.IsNullOrEmpty(sender.Nickname)) return sender.Nickname;
+                    var sender = await client.CallActionAsync<OneBotSender>(
+                        "get_group_member_info",
+                        new { group_id = groupId, user_id = userId, no_cache = false });
+                    if (sender != null)
+                    {
+                        if (!string.IsNullOrEmpty(sender.Card)) return sender.Card;
+                        if (!string.IsNullOrEmpty(sender.Nickname)) return sender.Nickname;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // 协议端可能未实现/不返回群成员信息（如部分轻量协议端），继续尝试陌生人信息
+                    logger.LogDebug(ex, "获取群成员信息失败，尝试陌生人信息: {UserId}@{GroupId}", userId, groupId);
                 }
             }
 
