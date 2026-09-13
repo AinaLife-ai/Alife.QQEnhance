@@ -1732,11 +1732,16 @@ public class QQEnhanceModule(
 
         bool isGroup = await DetectIsGroupAsync(targetId, type);
 
-        // B站：自建通用图文卡（news），不经签名、不依赖协议端平台白名单
+        // B站：自建通用图文卡（news）——**始终不走 ARK、也不走签名服务**
+        // 原因：第三方签名服务不认识 B站，会按"QQ音乐图文卡"兜底产出错误的 appid/tag 并代理封面
+        //（实测 ss.xingzhige.com 对 B站 数据返回 app=com.tencent.tuwen.lua / appid=100497308 / tag=QQ音乐），
+        // 这会导致卡片显示异常。我方自建卡使用 B站官方分享卡 appid，最贴近真实分享。
         if (pf == "bilibili")
         {
             if (!Configuration.BiliCardEnabled) { interactor.Poke("B站卡片功能已禁用"); return; }
             if (string.IsNullOrWhiteSpace(musicId)) { interactor.Poke("请传 BV 号（如 BV15wUXYAEci）"); return; }
+            if (Configuration.MusicArkEnabled || (Configuration.MusicSignUrl?.Trim() ?? "").Length > 0)
+                logger.LogInformation("B站卡片使用自建 news 卡（不经过 ARK/签名服务），以确保 appid 与标签正确");
             await SendBiliCardAsync(client, targetId, isGroup, musicId.Trim());
             return;
         }
@@ -1774,50 +1779,61 @@ public class QQEnhanceModule(
         //  - 用户配置了 MusicSignUrl        → 直接用插件侧签名（发 json 段）
         //  - 未配置但已确认公共签名可用      → 沿用公共签名（无感，不再走协议端）
         //  - 未配置且未探测/已确认不可用     → 走协议端原生 music 段
+        /// <summary>第三方 ARK 通道（统一最高优先级，B站卡除外）。成功返回 json 段，失败/未启用返回 null</summary>
+        async Task<object?> TryArkAsync(string platformType, string cardId)
+        {
+            if (!Configuration.MusicArkEnabled || string.IsNullOrWhiteSpace(Configuration.MusicArkToken)) return null;
+            if (_arkBroken)
+            {
+                logger.LogDebug("ARK 通道此前已失败，本次跳过（如需重试请在配置中关闭再开启该通道）");
+                return null;
+            }
+            string arkUrl = Configuration.MusicArkUrl?.Trim() ?? "";
+            if (arkUrl.Length == 0) return null;
+            string? arkJson = await SignMusicArkAsync(arkUrl, Configuration.MusicArkToken.Trim(),
+                cardId: cardId, platform: platformType,
+                title: songTitle, artist: songArtist, cover: songCover,
+                playUrl: playUrl, jumpUrl: "");
+            if (arkJson != null)
+                return new object[] { new { type = "json", data = new { data = arkJson } } };
+            _arkBroken = true;   // 失败一次即记下，后续不再尝试（用户重开开关可复位）
+            logger.LogWarning("第三方 ARK 签名失败，已切回默认通道（如需重试请在配置中关闭再开启该通道）");
+            return null;
+        }
+
+        // 原生卡片（非网易云平台或 163 样式）：ARK → 签名 → 协议端 music 段
         async Task<object> BuildNativeCardAsync(string platformType, string cardId)
         {
-            // ① 第三方 ARK 通道（开启且填了 Token 时优先；不依赖协议端签名，兼容性最好）
-            if (Configuration.MusicArkEnabled && !string.IsNullOrWhiteSpace(Configuration.MusicArkToken))
-            {
-                if (_arkBroken)
-                    logger.LogDebug("ARK 通道此前已失败，本次跳过（如需重试请在配置中关闭再开启该通道）");
-                else
-                {
-                    string arkUrl = Configuration.MusicArkUrl?.Trim() ?? "";
-                    if (arkUrl.Length > 0)
-                    {
-                        string? arkJson = await SignMusicArkAsync(arkUrl, Configuration.MusicArkToken.Trim(),
-                            cardId: cardId, platform: platformType,
-                            title: songTitle, artist: songArtist, cover: songCover,
-                            playUrl: playUrl, jumpUrl: "");
-                        if (arkJson != null)
-                            return new object[] { new { type = "json", data = new { data = arkJson } } };
-                        _arkBroken = true;   // 失败一次即记下，后续不再尝试（用户重开开关可复位）
-                        logger.LogWarning("第三方 ARK 签名失败，已切回默认通道（如需重试请在配置中关闭再开启该通道）");
-                    }
-                }
-            }
+            object? ark = await TryArkAsync(platformType, cardId);
+            if (ark != null) return ark;
 
             string configured = Configuration.MusicSignUrl?.Trim() ?? "";
             string? signUrl = configured.Length > 0
                 ? configured
-                : (_preferPluginSign == true && Configuration.MusicSignAutoFallback
+                : (_preferPluginSign != false && Configuration.MusicSignAutoFallback
                     ? Configuration.MusicSignFallbackUrl?.Trim()
                     : "");
 
             if (!string.IsNullOrEmpty(signUrl))
             {
-                string? signedJson = await SignMusicCardAsync(signUrl, platformType, cardId);
+                // 网易云平台用 custom 形式（我们提供字段，VIP 歌也能签成功）；其它平台原样透传 ID
+                string? signedJson = platformType is "163" or "search"
+                    ? await SignNcmCardAsync(signUrl, cardId, songTitle, songArtist, songCover, playUrl)
+                    : await SignMusicCardAsync(signUrl, platformType, cardId);
                 if (signedJson != null)
                 {
-                    if (configured.Length == 0 && _preferPluginSign != true)
-                        logger.LogInformation("公共签名服务可用，后续网易云卡片将沿用它（无需配置）");
+                    if (configured.Length == 0 && _preferPluginSign == null)
+                        logger.LogInformation("公共签名服务可用，后续卡片将沿用它（无需配置）");
+                    _preferPluginSign = true;
                     return new object[] { new { type = "json", data = new { data = signedJson } } };
                 }
                 if (configured.Length > 0)
                     logger.LogWarning("插件侧签名服务 {SignUrl} 请求失败，回退为原生 music 段交给协议端处理", signUrl);
                 else
+                {
                     _preferPluginSign = false;   // 公共签名不可用，本次及后续不再尝试
+                    logger.LogWarning("公共签名服务不可用，已切回协议端通道（后续不再尝试）");
+                }
             }
             return new object[] { new { type = "music", data = new { type = platformType, id = cardId } } };
         }
@@ -1891,6 +1907,9 @@ public class QQEnhanceModule(
                 cardId = ncmId.ToString();
             }
 
+            // 先解析歌曲信息（签名/ARK 用 custom 形式提供字段，VIP 歌也能签成功）
+            if (ncmFamily) await ResolveSongAsync();
+
             var r1 = await SendAsync(await BuildNativeCardAsync(pf == "search" ? "163" : pf, cardId));
             if (r1.ok) return;
             if (r1.reason == "timeout") { interactor.Poke(timeoutHint); return; }
@@ -1932,7 +1951,9 @@ public class QQEnhanceModule(
             interactor.Poke($"未找到歌曲：{musicId}。可换个更短的关键词重试（只用歌名或只用歌手名），若多次失败说明搜索接口暂时不可用，可稍后再试");
             return;
         }
-        var rC = await SendAsync(cfgStyle == "record" ? BuildRecord() : BuildCustomCard());
+        // ②' ARK 统一最高优先级：custom/record 样式同样先试 ARK（网易云歌曲信息此时已解析）
+        object? arkStyle = await TryArkAsync("163", ncmId.ToString());
+        var rC = await SendAsync(arkStyle ?? (cfgStyle == "record" ? BuildRecord() : BuildCustomCard()));
         if (rC.ok) return;
         if (rC.reason == "timeout") { interactor.Poke(timeoutHint); return; }
         if (rC.rejected && cfgStyle == "custom")
@@ -2008,6 +2029,53 @@ public class QQEnhanceModule(
         {
             return cardJson;   // 解析失败原样返回，不破坏原有行为
         }
+    }
+
+    /// <summary>网易云歌曲信息 → 签名服务（custom 形式：我们提供歌名/歌手/封面/直链，签名服务无需再查歌）。
+    /// 这样 VIP/版权受限歌曲也能签成功（直接送 {type:"163",id} 会因服务查不到歌曲信息而失败）。
+    /// 失败自动兼容回退为 {type,id} 形式，成功返回卡片 JSON</summary>
+    private static async Task<string?> SignNcmCardAsync(string signUrl, string cardId, string title, string artist, string cover, string playUrl)
+    {
+        // 主路径：custom 形式（带完整字段）
+        string? byFields = await PostSignAsync(signUrl, new
+        {
+            type = "custom",
+            url = $"https://music.163.com/song?id={cardId}",
+            audio = playUrl,
+            title = string.IsNullOrWhiteSpace(title) ? "未知歌曲" : title,
+            singer = string.IsNullOrWhiteSpace(artist) ? "未知" : artist,
+            content = string.IsNullOrWhiteSpace(artist) ? "未知" : artist,
+            image = string.IsNullOrWhiteSpace(cover)
+                ? "https://p1.music.126.net/6y-UleORITEDbvrOLV0Q8A==/5639395138885805.jpg" : cover
+        });
+        if (byFields != null) return byFields;
+        // 兼容回退：部分自建签名服务只认 {type,id}
+        return await PostSignAsync(signUrl, new { type = "163", id = cardId });
+    }
+
+    /// <summary>POST 签名服务并取出卡片 JSON（兼容 {"data":"..."} 包裹与直接返回）</summary>
+    private static async Task<string?> PostSignAsync(string signUrl, object payload)
+    {
+        try
+        {
+            using var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+            using var resp = await _http.PostAsync(signUrl, content);
+            if (!resp.IsSuccessStatusCode) return null;
+            string body = (await resp.Content.ReadAsStringAsync()).Trim();
+            if (body.StartsWith("{"))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(body);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                        doc.RootElement.TryGetProperty("data", out var d) && d.ValueKind == JsonValueKind.String)
+                        return EnsureCardFields(d.GetString());
+                }
+                catch { /* 按原始字符串处理 */ }
+            }
+            return EnsureCardFields(body.Length > 10 ? body : null);
+        }
+        catch { return null; }
     }
 
     /// <summary>第三方 ARK 签名：GET {url}?key=...&amp;format=...&amp;song=...&amp;singer=...&amp;url=...&amp;jump=...&amp;cover=...，
