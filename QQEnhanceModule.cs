@@ -8,6 +8,8 @@ using System.Net.Http;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.Encodings.Web;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -63,8 +65,12 @@ public class QQEnhanceConfig
     public string MusicCardStyle { get; set; } = "custom";
 
     [DisplayName("音乐签名服务地址")]
-    [Description("可选。填入后由插件直接完成卡片签名再发送，不再依赖NapCat的musicSignUrl配置（NapCat默认用 ss.xingzhige.com 公共签名，该服务不稳定或卡片版本过期时接收方会显示\"发送者版本过低\"）。例如自建或第三方签名服务地址。留空=交给NapCat处理")]
+    [Description("可选。填入后由插件直接完成卡片签名再发送（协议端不再处理 music 段）。留空则交给协议端：NapCat 有内置默认签名服务，可直接发送；LLBot 未配置 musicSignUrl 时会直接报「音乐卡片签名地址未配置」，必须自行填写。常用公共签名：https://ss.xingzhige.com/music_card/card（实测可用）。注意：网易云 VIP/版权受限歌曲可能因平台限制无法解析（表现为签名服务返回「无法准确获取歌曲信息」），此时会自动降级为自定义卡片或语音条")]
     public string MusicSignUrl { get; set; } = "";
+
+    [DisplayName("B站卡片")]
+    [Description("启用发送B站视频卡片（platform=bilibili 传 BV 号）。使用 QQ 通用图文卡（news）自行构造，不依赖任何签名服务与协议端白名单；如需关闭可在此禁用")]
+    public bool BiliCardEnabled { get; set; } = true;
 
     [DisplayName("互动提示")]
     [Description("收到QQ消息时在消息末尾附加互动提示（类似官方消息过滤的注入机制），提醒AI可以随手贴表情/引用/戳一戳/点赞")]
@@ -91,9 +97,25 @@ public class QQEnhanceConfig
     [Description("收到别人的戳一戳后注入决策提示，让模型顺带决定是否回戳（PokeBack），不影响正常回复构建")]
     public bool PokeDecideEnabled { get; set; } = true;
 
-    [DisplayName("提示冷却时间(秒)")]
-    [Description("戳回决策/被赞/被贴表情等事件提示的最小间隔，默认10秒")]
+    [DisplayName("提示冷却时间(秒)-已废弃")]
+    [Description("已废弃：4.9.23 起各类事件提示冷却已拆分，请用下方四个独立配置项，此项不再生效（仅为兼容旧配置保留）")]
     public double NoticeCooldownSeconds { get; set; } = 10;
+
+    [DisplayName("戳一戳提示冷却(秒)")]
+    [Description("同一时间内最多提示一次被戳（超出静默忽略，不排队不合并），默认10秒，最小1秒")]
+    public double PokeCooldownSeconds { get; set; } = 10;
+
+    [DisplayName("被赞提示冷却(秒)")]
+    [Description("同一时间内最多提示一次资料卡被赞，默认10秒，最小1秒")]
+    public double ProfileLikeCooldownSeconds { get; set; } = 10;
+
+    [DisplayName("被贴表情提示冷却(秒)")]
+    [Description("他人给「你的消息」贴表情时的提示冷却，默认10秒，最小1秒")]
+    public double EmojiLikeCooldownSeconds { get; set; } = 10;
+
+    [DisplayName("他人贴他人表情提示冷却(秒)")]
+    [Description("他人给「别人的消息」贴表情时的提示冷却（需开启上方开关），默认30秒——这类互动较频繁，间隔放宽避免刷屏，最小1秒")]
+    public double OthersEmojiLikeCooldownSeconds { get; set; } = 30;
 
     [DisplayName("戳一戳防刷限次")]
     [Description("同一人同一窗口内最多受理的戳一戳次数，超出后静默忽略（防双AI互戳/连戳脚本无限循环；0=不限制）。注意：不影响正常玩闹，仅作保险丝")]
@@ -353,7 +375,14 @@ public class QQEnhanceModule(
     private bool NotRecalled(LiveMessage m) => !_recalledIds.ContainsKey(m.MessageId);
     private DateTime _lastLikePromptTime = DateTime.MinValue;
     private DateTime _lastEmojiLikePromptTime = DateTime.MinValue;
-    private TimeSpan NoticeCooldown => TimeSpan.FromSeconds(Math.Max(1, Configuration.NoticeCooldownSeconds));
+    /// <summary>「他人给别人的消息贴表情」独立计时（与「贴我的消息」分开，各自的冷却不同）</summary>
+    private DateTime _lastOthersEmojiLikePromptTime = DateTime.MinValue;
+
+    private static TimeSpan Cool(double seconds) => TimeSpan.FromSeconds(Math.Max(1, seconds));
+    private TimeSpan PokeCooldown => Cool(Configuration.PokeCooldownSeconds);
+    private TimeSpan ProfileLikeCooldown => Cool(Configuration.ProfileLikeCooldownSeconds);
+    private TimeSpan EmojiLikeCooldown => Cool(Configuration.EmojiLikeCooldownSeconds);
+    private TimeSpan OthersEmojiLikeCooldown => Cool(Configuration.OthersEmojiLikeCooldownSeconds);
 
     private void AddLiveMessage(LiveMessage msg)
     {
@@ -1614,6 +1643,12 @@ public class QQEnhanceModule(
 
     private static readonly HttpClient _http = new HttpClient { Timeout = TimeSpan.FromSeconds(12) };
 
+    /// <summary>卡片 JSON 序列化选项：中文不转义（日志可读，且避免个别实现对 \uXXXX 处理不当）</summary>
+    private static readonly JsonSerializerOptions CardJsonOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
     /// <summary>CQ码转义（custom音乐卡片字段用）</summary>
     /// <summary>折叠长文本：>15字符时显示首5...尾5（省token，AI可识别）</summary>
     private static string FoldText(string s) => s.Length <= 15 ? s : s[..5] + "..." + s[^5..];
@@ -1626,7 +1661,7 @@ public class QQEnhanceModule(
     public async Task SendMusicCard(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("消息类型：private或group，可省略，省略时自动判定")] string type = "",
-        [Description("音乐平台：search=关键词搜索网易云（推荐）/163=网易云歌曲ID/qq/kugou/migu/kuwo=对应平台原生ID")] string platform = "search",
+        [Description("音乐平台：search=关键词搜索网易云（推荐）/163=网易云歌曲ID/qq/kugou/migu/kuwo=对应平台原生ID/bilibili=B站视频（musicId 传 BV 号，如 BV15wUXYAEci）")] string platform = "search",
         [Description("歌曲关键词（platform=search时）或平台音乐ID（其他platform时原样透传，不做任何转换）")] string musicId = "",
         [Description("卡片样式（可选）：custom=自定义卡片/record=语音条/163=原生卡片；省略则用配置默认值。仅对网易云歌曲（platform=search/163）生效，其它平台一律原生卡片。注：custom/163 是否走协议端签名服务由协议端决定（失败会自动降级），record 语音条不依赖签名")] string style = "")
     {
@@ -1648,10 +1683,12 @@ public class QQEnhanceModule(
             "kugou" or "酷狗" => "kugou",
             "kuwo" or "酷我" => "kuwo",
             "migu" or "咪咕" => "migu",
+            "bilibili" or "b站" or "哔哩哔哩" or "bili" or "bv" => "bilibili",
             _ => long.TryParse(musicId.Trim(), out _) ? "163" : "search",
         };
         if (rawPlatform is not ("" or "search" or "163" or "网易云" or "netease" or "wy" or "wyy"
-            or "qq" or "qq音乐" or "qqmusic" or "kugou" or "酷狗" or "kuwo" or "酷我" or "migu" or "咪咕"))
+            or "qq" or "qq音乐" or "qqmusic" or "kugou" or "酷狗" or "kuwo" or "酷我" or "migu" or "咪咕"
+            or "bilibili" or "b站" or "哔哩哔哩" or "bili" or "bv"))
             logger.LogDebug("未识别的音乐平台 {Platform}，按网易云处理（musicId 为纯数字则视为歌曲ID，否则按关键词搜索）", platform);
         // 只有网易云系平台能解析出歌曲ID与直链
         bool ncmFamily = pf is "search" or "163";
@@ -1666,7 +1703,17 @@ public class QQEnhanceModule(
             cfgStyle = "163";
         }
 
+
         bool isGroup = await DetectIsGroupAsync(targetId, type);
+
+        // B站：自建通用图文卡（news），不经签名、不依赖协议端平台白名单
+        if (pf == "bilibili")
+        {
+            if (!Configuration.BiliCardEnabled) { interactor.Poke("B站卡片功能已禁用"); return; }
+            if (string.IsNullOrWhiteSpace(musicId)) { interactor.Poke("请传 BV 号（如 BV15wUXYAEci）"); return; }
+            await SendBiliCardAsync(client, targetId, isGroup, musicId.Trim());
+            return;
+        }
 
         // 网易云歌曲信息：解析一次，主流程与降级共用（降级不再产生任何额外请求）
         long ncmId = 0;
@@ -1837,9 +1884,124 @@ public class QQEnhanceModule(
                 }
                 catch { /* 按原始字符串处理 */ }
             }
-            return body.Length > 10 ? body : null;
+            return EnsureCardFields(body.Length > 10 ? body : null);
         }
         catch { return null; }
+    }
+
+    /// <summary>签名服务返回的卡片 JSON 兜底补全 prompt/ver/view——
+    /// 部分签名实现（尤其是自建/第三方）不返回这三个字段，QQ 端可能不渲染成卡片。已有值不覆盖。</summary>
+    private static string? EnsureCardFields(string? cardJson)
+    {
+        if (string.IsNullOrWhiteSpace(cardJson) || !cardJson.TrimStart().StartsWith("{")) return cardJson;
+        try
+        {
+            using var doc = JsonDocument.Parse(cardJson);
+            var node = JsonNode.Parse(doc.RootElement.GetRawText())!.AsObject();
+            if (!node.ContainsKey("ver")) node["ver"] = "0.0.0.1";
+            if (!node.ContainsKey("prompt"))
+            {
+                string title = node["meta"]?["music"]?["title"]?.GetValue<string>() ?? "";
+                node["prompt"] = string.IsNullOrEmpty(title) ? "[分享]" : $"[分享]{title}";
+            }
+            if (!node.ContainsKey("view"))
+                node["view"] = node["meta"]?.AsObject().ContainsKey("music") == true ? "music" : "news";
+            return node.ToJsonString(CardJsonOptions);
+        }
+        catch
+        {
+            return cardJson;   // 解析失败原样返回，不破坏原有行为
+        }
+    }
+
+    /// <summary>B站官方分享卡 appid（QQ 通用图文卡）</summary>
+    private const long BiliArkAppId = 100951776;
+
+    /// <summary>发送B站视频卡片：拉取视频信息 → 自建 news 卡 JSON → 以 json 段发送。
+    /// news 卡不需要签名（QQ 仅对 music 卡校验签名通道），因此不依赖任何签名服务与协议端平台白名单。</summary>
+    private async Task SendBiliCardAsync(OneBotClient client, long targetId, bool isGroup, string bv)
+    {
+        if (!Regex.IsMatch(bv, @"^BV[0-9A-Za-z]{10}$"))
+        {
+            interactor.Poke($"BV号格式不正确：{bv}。正确形如 BV15wUXYAEci");
+            return;
+        }
+        string title = "", up = "", cover = "";
+        try
+        {
+            string url = $"https://api.bilibili.com/x/web-interface/view?bvid={bv}";
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.TryAddWithoutValidation("Referer", $"https://www.bilibili.com/video/{bv}");
+            req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
+            using var resp = await _http.SendAsync(req);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
+            {
+                interactor.Poke($"未找到该B站视频：{bv}（接口返回异常，请确认BV号是否正确）");
+                return;
+            }
+            title = data.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+            if (data.TryGetProperty("owner", out var owner) && owner.ValueKind == JsonValueKind.Object)
+                up = owner.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+            cover = data.TryGetProperty("pic", out var p) ? p.GetString() ?? "" : "";
+            if (cover.StartsWith("//")) cover = "https:" + cover;
+        }
+        catch (Exception e)
+        {
+            interactor.Poke($"B站视频信息获取失败：{e.Message}");
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(title)) title = bv;
+        if (string.IsNullOrWhiteSpace(cover))
+            cover = "https://p1.music.126.net/6y-UleORITEDbvrOLV0Q8A==/5639395138885805.jpg";
+
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        long uin = client.BotId;
+        string jump = $"https://www.bilibili.com/video/{bv}";
+        var card = new
+        {
+            app = "com.tencent.structmsg",
+            view = "news",
+            ver = "0.0.0.1",
+            prompt = $"[分享]{title}",
+            config = new { autosize = 1, ctime = now, forward = 1, type = "normal" },
+            meta = new
+            {
+                news = new
+                {
+                    app_type = 1,
+                    appid = BiliArkAppId,
+                    ctime = now,
+                    desc = up,
+                    jumpUrl = jump,
+                    preview = cover,
+                    tag = "哔哩哔哩",
+                    tagIcon = "https://www.bilibili.com/favicon.ico",
+                    title,
+                    uin
+                }
+            }
+        };
+        string cardJson = JsonSerializer.Serialize(card, CardJsonOptions);
+        object message = new object[] { new { type = "json", data = new { data = cardJson } } };
+
+        try
+        {
+            object sendParams = isGroup ? new { group_id = targetId, message } : new { user_id = targetId, message };
+            SendResult? sent = await client.CallActionAsync<SendResult>("send_msg", sendParams);
+            long sentId = ExtractSentId(sent);
+            if (sentId != 0)
+                RecordSentMessage(sentId, isGroup ? targetId : 0, isGroup ? 0 : targetId, $"[B站卡片 {bv}]");
+            // 成功静默：不触发AI新一轮确认回复
+        }
+        catch (TaskCanceledException)
+        {
+            interactor.Poke("B站卡片请求超时（10秒未收到协议端响应）。卡片可能已发出，请先用 QGetMessages 确认，不要重复发送");
+        }
+        catch (Exception e)
+        {
+            interactor.Poke($"B站卡片发送失败：{e.Message}");
+        }
     }
 
     /// <summary>网易云歌曲详情（标题/歌手/封面），失败时回退到关键词与默认封面</summary>
@@ -2089,14 +2251,13 @@ public class QQEnhanceModule(
             string? noticeType = noticeEvent.NoticeType;
             if (noticeType == "profile_like" && Configuration.PerceiveProfileLike)
             {
-                if (DateTime.Now - _lastLikePromptTime < NoticeCooldown) return;
+                if (DateTime.Now - _lastLikePromptTime < ProfileLikeCooldown) return;
                 _lastLikePromptTime = DateTime.Now;
                 long uid = noticeEvent.UserId;
                 interactor.Poke($"[System 用户{uid} 赞了你的资料卡。可以回赞（SendQQLikes qq={uid}）或戳一戳回应，也可以忽略]");
             }
             else if (noticeType == "group_msg_emoji_like" && Configuration.PerceiveEmojiLike)
             {
-                if (DateTime.Now - _lastEmojiLikePromptTime < NoticeCooldown) return;
                 long uid = noticeEvent.UserId;
                 // 自己贴的表情不提示自己（与 poke 分支"自己发起的一律无视"对齐）
                 if (uid == noticeEvent.SelfId) return;
@@ -2171,8 +2332,14 @@ public class QQEnhanceModule(
                 bool isOwnMessage = targetUid == noticeEvent.SelfId;
                 if (!isOwnMessage && !Configuration.PerceiveOthersEmojiLike) return;
 
+                // 冷却按类型分开计：给「我的消息」贴 / 给「别人的消息」贴 各自独立时长
+                DateTime lastPrompt = isOwnMessage ? _lastEmojiLikePromptTime : _lastOthersEmojiLikePromptTime;
+                TimeSpan cooldown = isOwnMessage ? EmojiLikeCooldown : OthersEmojiLikeCooldown;
+                if (DateTime.Now - lastPrompt < cooldown) return;
+
                 // 通过全部过滤后才占用冷却，避免被抑制的事件把冷却槽吃掉
-                _lastEmojiLikePromptTime = DateTime.Now;
+                if (isOwnMessage) _lastEmojiLikePromptTime = DateTime.Now;
+                else _lastOthersEmojiLikePromptTime = DateTime.Now;
 
                 string operatorName = uid == 0 ? "" : await GetQQUserName(uid, noticeEvent.GroupId);
                 string opText = uid == 0 ? "某位用户" : (string.IsNullOrEmpty(operatorName) ? $"用户{uid}" : $"用户{uid}({operatorName})");
@@ -2281,7 +2448,7 @@ public class QQEnhanceModule(
                 _lastPokeRequest = new PokeRequest(noticeEvent.UserId, noticeEvent.GroupId, isGroup, DateTime.Now);
 
                 // 冷却期内不重复注入，避免连续戳一戳刷屏上下文
-                if (DateTime.Now - _lastPokePromptTime < NoticeCooldown) return;
+                if (DateTime.Now - _lastPokePromptTime < PokeCooldown) return;
                 _lastPokePromptTime = DateTime.Now;
 
                 string userName = await GetQQUserName(noticeEvent.UserId, noticeEvent.GroupId);
