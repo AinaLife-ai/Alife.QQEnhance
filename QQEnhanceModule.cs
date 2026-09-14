@@ -1778,6 +1778,10 @@ public class QQEnhanceModule(
         {
             var (ot, oa, oc, oj, op) = await ResolveOtherPlatformInfoAsync(pf, musicId.Trim());
             songTitle = ot; songArtist = oa; songCover = oc; otherJumpUrl = oj; playUrl = op;
+            if (playUrl.Length > 0)
+                logger.LogDebug("平台 {Platform} 已取到播放直链", pf);
+            else
+                logger.LogDebug("平台 {Platform} 未取到播放直链（custom/record 将不可用，直接走原生卡片）", pf);
         }
 
         // B站：自建通用图文卡（news）——**始终不走 ARK、也不走签名服务**
@@ -2716,14 +2720,18 @@ public class QQEnhanceModule(
                 string albid = dd.GetProperty("album").GetProperty("mid").GetString() ?? "";
                 if (albid.Length > 0)
                     cover = "https://y.qq.com/music/photo_new/T002R300x300M000" + albid + ".jpg";
+                // 播放直链：vkey 接口（此前未取 → ARK/签名报「缺少必要参数 url」）
+                play = await ResolveQQPlayUrlAsync(mid);
             }
             else if (platform == "kugou")
             {
                 jump = $"https://www.kugou.com/song/#hash={id}";
+                // 先取 album_id/mid（部分接口需要），再取播放地址
                 string u = "https://wwwapi.kugou.com/yy/index.php?r=play/getdata&hash=" + Uri.EscapeDataString(id);
                 using var req = new HttpRequestMessage(HttpMethod.Get, u);
                 req.Headers.TryAddWithoutValidation("Referer", "https://www.kugou.com/");
                 req.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
+                req.Headers.TryAddWithoutValidation("Cookie", "kg_mid=1; kg_dfid=1");
                 using var resp = await _http.SendAsync(req);
                 using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
                 if (doc.RootElement.TryGetProperty("data", out var dd) && dd.ValueKind == JsonValueKind.Object)
@@ -2750,6 +2758,40 @@ public class QQEnhanceModule(
         if (string.IsNullOrWhiteSpace(title)) title = id;
         if (string.IsNullOrWhiteSpace(artist)) artist = platform;
         return (title, artist, cover, jump, play);
+    }
+
+    /// <summary>QQ音乐播放直链（vkey 接口）。返回可播 URL 或空串。
+    /// 实测：返回 sip[0] + purl（形如 http://aqqmusic.tc.qq.com/xxx.m4a?vkey=...），内容为 audio/mp4 真实音频</summary>
+    private static async Task<string> ResolveQQPlayUrlAsync(string songMid)
+    {
+        try
+        {
+            string payload = "{\"req_0\":{\"module\":\"vkey.GetVkeyServer\",\"method\":\"CgiGetVkey\",\"param\":{"
+                + "\"guid\":\"10000\",\"songmid\":[\"" + songMid + "\"],\"songtype\":[0],"
+                + "\"uin\":\"0\",\"loginflag\":1,\"platform\":\"20\"}},"
+                + "\"comm\":{\"uin\":0,\"format\":\"json\",\"ct\":24,\"cv\":0}}";
+            using var req = new HttpRequestMessage(HttpMethod.Post, "https://u.y.qq.com/cgi-bin/musicu.fcg");
+            req.Headers.TryAddWithoutValidation("Referer", "https://y.qq.com/");
+            req.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
+            req.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+            using var resp = await _http.SendAsync(req);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            if (!doc.RootElement.TryGetProperty("req_0", out var req0) ||
+                !req0.TryGetProperty("data", out var data) ||
+                !data.TryGetProperty("sip", out var sip) || sip.GetArrayLength() == 0 ||
+                !data.TryGetProperty("midurlinfo", out var midInfo) || midInfo.GetArrayLength() == 0)
+                return "";
+            string sip0 = sip[0].GetString() ?? "";
+            string purl = midInfo[0].TryGetProperty("purl", out var p) ? p.GetString() ?? "" : "";
+            if (sip0.Length == 0 || purl.Length == 0) return "";
+            string url = sip0 + purl;
+            return await IsPlayableAudioAsync(url) ? url : "";
+        }
+        catch (Exception ex)
+        {
+            loggerStaticForInfo?.LogDebug(ex, "QQ音乐直链解析失败");
+            return "";
+        }
     }
 
     /// <summary>浏览器 UA（B站/腾讯等接口需要，避免被风控）</summary>
