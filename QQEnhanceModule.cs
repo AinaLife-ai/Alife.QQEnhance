@@ -398,8 +398,14 @@ public class QQEnhanceModule(
     /// <summary>签名通道偏好：null=未探测（按配置走协议端）；true=已确认公共签名可用（沿用，无感）；false=已确认不可用（不再尝试）</summary>
     private bool? _preferPluginSign;
 
-    /// <summary>第三方 ARK 通道失败标记（失败一次即不再尝试，避免每次多一次超时等待）</summary>
+    /// <summary>第三方 ARK 通道失败标记（仅"服务不可用"时置位，避免每次多一次超时等待）</summary>
     private bool _arkBroken;
+
+    /// <summary>上一次 ARK 调用是否为"服务不可用"（HTTP 失败/超时），供失败分类使用</summary>
+    private bool ArkServiceUnavailable;
+
+    /// <summary>静态方法内可用的日志器引用（供非静态辅助方法使用）</summary>
+    private static ILogger<QQEnhanceModule>? loggerStaticForInfo;
 
     /// <summary>「他人给别人的消息贴表情」独立计时（与「贴我的消息」分开，各自的冷却不同）</summary>
     private DateTime _lastOthersEmojiLikePromptTime = DateTime.MinValue;
@@ -678,6 +684,8 @@ public class QQEnhanceModule(
 
     protected override Task OnAwake()
     {
+        loggerStaticForInfo ??= logger;
+
         bool yuYangActive = IsYuYangActive();
         if (yuYangActive)
             logger.LogInformation("QQ增强：检测到 YuYang.QQTools 已启用，重叠功能将让位（兼容模式 {Mode}）", Configuration.CompatibilityMode);
@@ -1749,6 +1757,7 @@ public class QQEnhanceModule(
         // 网易云歌曲信息：解析一次，主流程与降级共用（降级不再产生任何额外请求）
         long ncmId = 0;
         string songTitle = "", songArtist = "", songCover = "", playUrl = "";
+        string otherJumpUrl = "";   // 非网易云平台的跳转链接（供 ARK 使用）
         bool resolved = false;
         async Task<bool> ResolveSongAsync()
         {
@@ -1793,11 +1802,20 @@ public class QQEnhanceModule(
             string? arkJson = await SignMusicArkAsync(arkUrl, Configuration.MusicArkToken.Trim(),
                 cardId: cardId, platform: platformType,
                 title: songTitle, artist: songArtist, cover: songCover,
-                playUrl: playUrl, jumpUrl: "");
+                playUrl: playUrl, jumpUrl: otherJumpUrl);
             if (arkJson != null)
                 return new object[] { new { type = "json", data = new { data = arkJson } } };
-            _arkBroken = true;   // 失败一次即记下，后续不再尝试（用户重开开关可复位）
-            logger.LogWarning("第三方 ARK 签名失败，已切回默认通道（如需重试请在配置中关闭再开启该通道）");
+            // 失败分类：只有"签名服务本身不可用"才永久标记；字段类失败（如信息解析不到）不标记，
+            // 否则一次失败会连累后续所有平台的卡片（此前非网易云平台带空字段导致 ARK 被永久禁用）
+            if (ArkServiceUnavailable)
+            {
+                _arkBroken = true;
+                logger.LogWarning("第三方 ARK 签名服务不可用，已切回默认通道（如需重试请在配置中关闭再开启该通道）");
+            }
+            else
+            {
+                logger.LogWarning("第三方 ARK 签名被拒（可能是歌曲信息不完整），本次改用默认通道，下次仍会尝试");
+            }
             return null;
         }
 
@@ -1816,10 +1834,10 @@ public class QQEnhanceModule(
 
             if (!string.IsNullOrEmpty(signUrl))
             {
-                // 网易云平台用 custom 形式（我们提供字段，VIP 歌也能签成功）；其它平台原样透传 ID
-                string? signedJson = platformType is "163" or "search"
-                    ? await SignNcmCardAsync(signUrl, cardId, songTitle, songArtist, songCover, playUrl)
-                    : await SignMusicCardAsync(signUrl, platformType, cardId);
+                // 一律用 custom 形式（我们提供字段）——实测签名服务对非网易云平台的 {type,id} 形式不可用
+                //（qq 返回"关闭id解析功能"、kugou/kuwo/migu 直接 500），而 custom 形式各平台内容都能签成功
+                string? signedJson = await SignNcmCardAsync(signUrl, cardId, songTitle, songArtist, songCover, playUrl,
+                    platformType: platformType);
                 if (signedJson != null)
                 {
                     if (configured.Length == 0 && _preferPluginSign == null)
@@ -1908,7 +1926,18 @@ public class QQEnhanceModule(
             }
 
             // 先解析歌曲信息（签名/ARK 用 custom 形式提供字段，VIP 歌也能签成功）
-            if (ncmFamily) await ResolveSongAsync();
+            if (ncmFamily)
+            {
+                await ResolveSongAsync();
+            }
+            else
+            {
+                // 非网易云平台：解析歌名/歌手/封面（此前留空会被签名服务当缺参拒绝，并连累 ARK 被误判不可用）
+                var (ot, oa, oc, oj, op) = await ResolveOtherPlatformInfoAsync(pf, cardId);
+                songTitle = ot; songArtist = oa; songCover = oc;
+                playUrl = op;        // 非网易云通常拿不到直链；留空（record 降级时无直链会自动跳过，不会发出坏语音）
+                otherJumpUrl = oj;
+            }
 
             var r1 = await SendAsync(await BuildNativeCardAsync(pf == "search" ? "163" : pf, cardId));
             if (r1.ok) return;
@@ -2034,13 +2063,22 @@ public class QQEnhanceModule(
     /// <summary>网易云歌曲信息 → 签名服务（custom 形式：我们提供歌名/歌手/封面/直链，签名服务无需再查歌）。
     /// 这样 VIP/版权受限歌曲也能签成功（直接送 {type:"163",id} 会因服务查不到歌曲信息而失败）。
     /// 失败自动兼容回退为 {type,id} 形式，成功返回卡片 JSON</summary>
-    private static async Task<string?> SignNcmCardAsync(string signUrl, string cardId, string title, string artist, string cover, string playUrl)
+    private static async Task<string?> SignNcmCardAsync(string signUrl, string cardId, string title, string artist, string cover, string playUrl,
+        string platformType = "163")
     {
+        string songUrl = platformType switch
+        {
+            "qq" => $"https://y.qq.com/n/ryqq/songDetail/{cardId}",
+            "kugou" => $"https://www.kugou.com/song/#hash={cardId}",
+            "kuwo" => $"https://www.kuwo.cn/play_detail/{cardId}",
+            "migu" => $"https://music.migu.cn/v3/music/song/{cardId}",
+            _ => $"https://music.163.com/song?id={cardId}",
+        };
         // 主路径：custom 形式（带完整字段）
         string? byFields = await PostSignAsync(signUrl, new
         {
             type = "custom",
-            url = $"https://music.163.com/song?id={cardId}",
+            url = songUrl,
             audio = playUrl,
             title = string.IsNullOrWhiteSpace(title) ? "未知歌曲" : title,
             singer = string.IsNullOrWhiteSpace(artist) ? "未知" : artist,
@@ -2049,8 +2087,10 @@ public class QQEnhanceModule(
                 ? "https://p1.music.126.net/6y-UleORITEDbvrOLV0Q8A==/5639395138885805.jpg" : cover
         });
         if (byFields != null) return byFields;
-        // 兼容回退：部分自建签名服务只认 {type,id}
-        return await PostSignAsync(signUrl, new { type = "163", id = cardId });
+        // 兼容回退：仅网易云可用 {type,id} 形式（其它平台该形式必失败，不再尝试）
+        return platformType is "163" or "search"
+            ? await PostSignAsync(signUrl, new { type = "163", id = cardId })
+            : null;
     }
 
     /// <summary>POST 签名服务并取出卡片 JSON（兼容 {"data":"..."} 包裹与直接返回）</summary>
@@ -2103,17 +2143,32 @@ public class QQEnhanceModule(
             };
             string fullUrl = arkUrl.TrimEnd('?', '&') + "?" + string.Join("&", q);
             using var resp = await _http.GetAsync(fullUrl);
-            if (!resp.IsSuccessStatusCode) return null;
+            if (!resp.IsSuccessStatusCode)
+            {
+                ArkServiceUnavailable = true;   // HTTP 失败 = 服务不可用，值得永久标记
+                return null;
+            }
             string body = (await resp.Content.ReadAsStringAsync()).Trim();
-            if (!body.StartsWith("{")) return null;
+            if (!body.StartsWith("{"))
+            {
+                ArkServiceUnavailable = true;
+                return null;
+            }
+            ArkServiceUnavailable = false;      // 能正常应答 = 服务可用，业务失败不标记
             using var doc = JsonDocument.Parse(body);
-            if (!doc.RootElement.TryGetProperty("code", out var codeEl) || ReadLong(codeEl) != 200) return null;
+            if (!doc.RootElement.TryGetProperty("code", out var codeEl) || ReadLong(codeEl) != 200)
+            {
+                string arkMsg = doc.RootElement.TryGetProperty("msg", out var mm) ? mm.GetString() ?? "" : "";
+                loggerStaticForInfo?.LogWarning("ARK 签名被拒（业务错误）：{Msg}", arkMsg);
+                return null;
+            }
             if (!doc.RootElement.TryGetProperty("data", out var dataEl)) return null;
             string cardJson = dataEl.ValueKind == JsonValueKind.String ? dataEl.GetString() ?? "" : dataEl.GetRawText();
             return EnsureCardFields(cardJson);
         }
         catch (Exception ex)
         {
+            ArkServiceUnavailable = true;   // 网络异常（连不上/超时）= 服务不可用，值得永久标记
             logger.LogDebug(ex, "ARK 签名失败");
             return null;
         }
@@ -2134,25 +2189,66 @@ public class QQEnhanceModule(
         string title = "", up = "", cover = "";
         try
         {
-            string url = $"https://api.bilibili.com/x/web-interface/view?bvid={bv}";
+            string url = $"https://api.bilibili.com/x/web-interface/view?bvid={Uri.EscapeDataString(bv)}";
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            // 完整浏览器头：缺 Accept/Cookie 时更易被 B站风控（返回 HTML 导致解析失败）
             req.Headers.TryAddWithoutValidation("Referer", $"https://www.bilibili.com/video/{bv}");
-            req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
+            req.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
+            req.Headers.TryAddWithoutValidation("Accept", "application/json, text/plain, */*");
+            req.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9");
+            req.Headers.TryAddWithoutValidation("Cookie", "buvid3=1; b_nut=1");
             using var resp = await _http.SendAsync(req);
-            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-            if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
+            string body;
+            using (var ms = new MemoryStream())
             {
-                interactor.Poke($"未找到该B站视频：{bv}（接口返回异常，请确认BV号是否正确）");
+                await resp.Content.CopyToAsync(ms);
+                body = Encoding.UTF8.GetString(ms.ToArray());
+            }
+
+            // 解析单独容错：风控/限流时 B站 会返回 HTML 而非 JSON
+            JsonDocument doc;
+            try
+            {
+                doc = JsonDocument.Parse(body);
+            }
+            catch (JsonException)
+            {
+                logger.LogWarning("B站接口返回非JSON（可能被风控），前200字符：{Head}", body.Length > 200 ? body[..200] : body);
+                interactor.Poke($"B站接口返回异常（可能被风控或限流），请稍后重试；BV号：{bv}");
                 return;
             }
-            title = data.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
-            if (data.TryGetProperty("owner", out var owner) && owner.ValueKind == JsonValueKind.Object)
-                up = owner.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-            cover = data.TryGetProperty("pic", out var p) ? p.GetString() ?? "" : "";
-            if (cover.StartsWith("//")) cover = "https:" + cover;
+            using (doc)
+            {
+                // 先判 code：B站失败时仍是 HTTP 200，但带 code/message（如 -400 请求错误 / -404 不存在 / -352 风控）
+                long code = doc.RootElement.TryGetProperty("code", out var codeEl) ? ReadLong(codeEl) : 0;
+                if (code != 0)
+                {
+                    string msg = doc.RootElement.TryGetProperty("message", out var m) ? m.GetString() ?? "" : "";
+                    string friendly = code switch
+                    {
+                        -400 => "请求错误（BV号格式不对或参数有误）",
+                        -404 => "视频不存在（可能已被删除或BV号有误）",
+                        -352 => "触发风控（请稍后重试或降低频率）",
+                        _ => msg.Length > 0 ? msg : "接口返回错误"
+                    };
+                    interactor.Poke($"未找到该B站视频：{bv}（{friendly}，code={code}）");
+                    return;
+                }
+                if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
+                {
+                    interactor.Poke($"B站视频信息不完整（{bv}），请确认BV号是否正确或稍后重试");
+                    return;
+                }
+                title = data.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                if (data.TryGetProperty("owner", out var owner) && owner.ValueKind == JsonValueKind.Object)
+                    up = owner.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                cover = data.TryGetProperty("pic", out var p) ? p.GetString() ?? "" : "";
+                if (cover.StartsWith("//")) cover = "https:" + cover;
+            }
         }
         catch (Exception e)
         {
+            logger.LogWarning(e, "B站视频信息获取失败：{Bv}", bv);
             interactor.Poke($"B站视频信息获取失败：{e.Message}");
             return;
         }
@@ -2311,6 +2407,83 @@ public class QQEnhanceModule(
         return 0;
     }
 
+
+    /// <summary>非网易云平台歌曲信息（供 ARK / 签名服务使用）：尽量取到歌名/歌手/封面/跳转/直链。
+    /// 取不到时用音乐ID兜底，保证 ARK/签名服务不因字段为空而被拒</summary>
+    private static async Task<(string title, string artist, string cover, string jump, string playUrl)> ResolveOtherPlatformInfoAsync(string platform, string id)
+    {
+        string title = id, artist = platform, cover = "", jump = "", play = "";
+        try
+        {
+            if (platform == "qq")
+            {
+                jump = $"https://y.qq.com/n/ryqq/songDetail/{id}";
+                string mid = id;
+                if (long.TryParse(id, out _))   // 纯数字ID不认，先搜索拿字符串 mid
+                {
+                    string su = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w=" + Uri.EscapeDataString(title) + "&format=json&n=1&p=1";
+                    using var sreq = new HttpRequestMessage(HttpMethod.Get, su);
+                    sreq.Headers.TryAddWithoutValidation("Referer", "https://y.qq.com/");
+                    sreq.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
+                    using var sresp = await _http.SendAsync(sreq);
+                    using var sdoc = JsonDocument.Parse(await sresp.Content.ReadAsStringAsync());
+                    mid = sdoc.RootElement.GetProperty("data").GetProperty("song").GetProperty("list")[0]
+                        .GetProperty("songmid").GetString() ?? mid;
+                    jump = $"https://y.qq.com/n/ryqq/songDetail/{mid}";
+                }
+                string u = "https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg?songmid=" + mid
+                    + "&platform=yqq&format=json&inCharset=utf8&outCharset=utf-8";
+                using var req = new HttpRequestMessage(HttpMethod.Get, u);
+                req.Headers.TryAddWithoutValidation("Referer", "https://y.qq.com/");
+                req.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
+                using var resp = await _http.SendAsync(req);
+                using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                var dd = doc.RootElement.GetProperty("data")[0];
+                title = dd.GetProperty("title").GetString() ?? title;
+                artist = string.Join("/", dd.GetProperty("singer").EnumerateArray()
+                    .Select(a => a.GetProperty("name").GetString()));
+                string albid = dd.GetProperty("album").GetProperty("mid").GetString() ?? "";
+                if (albid.Length > 0)
+                    cover = "https://y.qq.com/music/photo_new/T002R300x300M000" + albid + ".jpg";
+            }
+            else if (platform == "kugou")
+            {
+                jump = $"https://www.kugou.com/song/#hash={id}";
+                string u = "https://wwwapi.kugou.com/yy/index.php?r=play/getdata&hash=" + Uri.EscapeDataString(id);
+                using var req = new HttpRequestMessage(HttpMethod.Get, u);
+                req.Headers.TryAddWithoutValidation("Referer", "https://www.kugou.com/");
+                req.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
+                using var resp = await _http.SendAsync(req);
+                using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+                if (doc.RootElement.TryGetProperty("data", out var dd) && dd.ValueKind == JsonValueKind.Object)
+                {
+                    title = dd.TryGetProperty("audio_name", out var an) ? an.GetString() ?? title : title;
+                    artist = dd.TryGetProperty("author_name", out var au) ? au.GetString() ?? artist : artist;
+                    cover = dd.TryGetProperty("img", out var im) ? im.GetString() ?? "" : "";
+                    play = dd.TryGetProperty("play_url", out var pu) ? pu.GetString() ?? "" : "";
+                }
+            }
+            else if (platform == "migu")
+            {
+                jump = $"https://music.migu.cn/v3/music/song/{id}";
+            }
+            else
+            {
+                jump = id;
+            }
+        }
+        catch (Exception ex)
+        {
+            loggerStaticForInfo?.LogDebug(ex, "获取 {Platform} 歌曲信息失败，使用ID兜底", platform);
+        }
+        if (string.IsNullOrWhiteSpace(title)) title = id;
+        if (string.IsNullOrWhiteSpace(artist)) artist = platform;
+        return (title, artist, cover, jump, play);
+    }
+
+    /// <summary>浏览器 UA（B站/腾讯等接口需要，避免被风控）</summary>
+    private const string BrowserUa =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
     /// <summary>网易云歌曲ID → 官方 outer 播放外链（302 到实际音频；协议端本地下载，不依赖第三方解析服务）</summary>
     private static string NeteaseOuterUrl(long id) => $"https://music.163.com/song/media/outer/url?id={id}.mp3";
