@@ -1766,9 +1766,12 @@ public class QQEnhanceModule(
             if (ncmId == 0) ncmId = await ResolveNcmIdAsync(pf, musicId);
             if (ncmId == 0) return false;
             (songTitle, songArtist, songCover) = await GetNcmSongDetailAsync(ncmId);
-            // audio 一律使用网易云 outer 外链（实测最稳：302 到实际音频，协议端本地下载不受防盗链/过期影响）。
-            // 第三方解析出的直链常有防盗链/过期问题（卡片能出但播放失败），因此不再用于 audio 字段。
-            playUrl = NeteaseOuterUrl(ncmId);
+            // audio 取「真实可播直链」：outer 外链已失效（实测 302 到 music.163.com/404，返回 HTML 而非音频），
+            // 因此优先用第三方解析出的 music.126.net 直链，并做真实可播校验（跟随重定向后必须是音频且足够大）
+            string? direct = await ResolveNcmUrlAsync(ncmId);
+            playUrl = !string.IsNullOrEmpty(direct) && await IsPlayableAudioAsync(direct)
+                ? direct
+                : NeteaseOuterUrl(ncmId);   // 拿不到真直链时才退回 outer（VIP 歌会走套壳卡，由签名服务处理音频）
             return true;
         }
 
@@ -1788,6 +1791,27 @@ public class QQEnhanceModule(
         //  - 用户配置了 MusicSignUrl        → 直接用插件侧签名（发 json 段）
         //  - 未配置但已确认公共签名可用      → 沿用公共签名（无感，不再走协议端）
         //  - 未配置且未探测/已确认不可用     → 走协议端原生 music 段
+        /// <summary>取"模板卡"：优先用签名服务产出的完整卡结构（含 appid/uin/tagIcon），
+        /// 供套壳使用；取不到返回 null（套壳将用内置默认值）。结果缓存，避免每次都请求</summary>
+        string? templateCard = null;
+        bool templateTried = false;
+        async Task<string?> GetTemplateAsync()
+        {
+            if (templateTried) return templateCard;
+            templateTried = true;
+            string signUrl = Configuration.MusicSignUrl?.Trim() ?? "";
+            if (signUrl.Length == 0 && Configuration.MusicSignAutoFallback)
+                signUrl = Configuration.MusicSignFallbackUrl?.Trim() ?? "";
+            if (signUrl.Length == 0 || ncmId == 0) return null;
+            try
+            {
+                templateCard = await SignNcmCardAsync(signUrl, ncmId.ToString(), songTitle, songArtist, songCover, playUrl);
+                if (templateCard != null) logger.LogDebug("已取到模板卡（用于套壳补全结构）");
+            }
+            catch { templateCard = null; }
+            return templateCard;
+        }
+
         /// <summary>第三方 ARK 通道（统一最高优先级，B站卡除外）。成功返回 json 段，失败/未启用返回 null</summary>
         async Task<object?> TryArkAsync(string platformType, string cardId)
         {
@@ -1804,7 +1828,12 @@ public class QQEnhanceModule(
                 title: songTitle, artist: songArtist, cover: songCover,
                 playUrl: playUrl, jumpUrl: otherJumpUrl);
             if (arkJson != null)
-                return new object[] { new { type = "json", data = new { data = arkJson } } };
+            {
+                // 套壳补全：ARK 返回的卡缺 extra{appid,uin} 与 meta.music 的 appid/app_type/ctime/uin/tagIcon，
+                // QQ 侧可能不按官方应用卡片渲染（表现为显示不完整/仅试听）→ 用签名服务的完整卡作模板补齐
+                string? shelled = ApplyCardShell(arkJson, await GetTemplateAsync(), GetBotId());
+                return new object[] { new { type = "json", data = new { data = shelled ?? arkJson } } };
+            }
             // 失败分类：只有"签名服务本身不可用"才永久标记；字段类失败（如信息解析不到）不标记，
             // 否则一次失败会连累后续所有平台的卡片（此前非网易云平台带空字段导致 ARK 被永久禁用）
             if (ArkServiceUnavailable)
@@ -1843,7 +1872,8 @@ public class QQEnhanceModule(
                     if (configured.Length == 0 && _preferPluginSign == null)
                         logger.LogInformation("公共签名服务可用，后续卡片将沿用它（无需配置）");
                     _preferPluginSign = true;
-                    return new object[] { new { type = "json", data = new { data = signedJson } } };
+                    string? shelled = ApplyCardShell(signedJson, null, GetBotId());
+                    return new object[] { new { type = "json", data = new { data = shelled ?? signedJson } } };
                 }
                 if (configured.Length > 0)
                     logger.LogWarning("插件侧签名服务 {SignUrl} 请求失败，回退为原生 music 段交给协议端处理", signUrl);
@@ -2035,6 +2065,91 @@ public class QQEnhanceModule(
         catch { return null; }
     }
 
+    /// <summary>套壳：把 ARK/签名返回的卡片补全成「完整卡片结构」。
+    /// 部分签名服务（如 ARK）只返回 meta.music 的基础字段，缺 extra{appid,uin} 与 meta.music 的
+    /// appid/app_type/ctime/uin/tagIcon —— QQ 侧可能不按"官方应用卡片"渲染，表现为显示不完整/仅试听。
+    /// 这里按 QQ 官方音乐卡结构补齐（已有值不覆盖）。template 为可选的模板卡（如签名服务产出的完整卡）。</summary>
+    private static string? ApplyCardShell(string? cardJson, string? template, long botUin)
+    {
+        if (string.IsNullOrWhiteSpace(cardJson) || !cardJson.TrimStart().StartsWith("{")) return cardJson;
+        try
+        {
+            using var doc = JsonDocument.Parse(cardJson);
+            JsonObject node = JsonNode.Parse(doc.RootElement.GetRawText())!.AsObject();
+
+            // 模板中的 appid / uin（优先用模板，其次默认网易云音乐 appid）
+            long appid = 100495085, uin = botUin;
+            string tagIcon = "https://p.qpic.cn/qqconnect/0/app_100495085_1626060999/100?max-age=2592000&t=0";
+            if (!string.IsNullOrWhiteSpace(template) && template!.TrimStart().StartsWith("{"))
+            {
+                try
+                {
+                    using var tdoc = JsonDocument.Parse(template);
+                    if (tdoc.RootElement.TryGetProperty("meta", out var tmeta) && tmeta.TryGetProperty("music", out var tmusic))
+                    {
+                        if (tmusic.TryGetProperty("appid", out var ta) && ta.TryGetInt64(out long taVal) && taVal != 0) appid = taVal;
+                        else if (tdoc.RootElement.TryGetProperty("extra", out var tex) &&
+                                 tex.TryGetProperty("appid", out var tea) && tea.TryGetInt64(out long teaVal) && teaVal != 0) appid = teaVal;
+                        if (tmusic.TryGetProperty("tagIcon", out var tti)) tagIcon = tti.GetString() ?? tagIcon;
+                    }
+                    if (tdoc.RootElement.TryGetProperty("extra", out var tex2) &&
+                        tex2.TryGetProperty("uin", out var tu) && tu.TryGetInt64(out long tuVal) && tuVal != 0) uin = tuVal;
+                }
+                catch { /* 模板不可用则用默认值 */ }
+            }
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+            // 顶层 extra（QQ 判断"官方应用卡片"的关键节点之一）
+            if (!node.ContainsKey("extra"))
+            {
+                node["extra"] = new JsonObject
+                {
+                    ["app_type"] = 1,
+                    ["appid"] = appid,
+                    ["uin"] = uin
+                };
+            }
+            // config 补全
+            if (node["config"] is not JsonObject cfg)
+            {
+                cfg = new JsonObject();
+                node["config"] = cfg;
+            }
+            cfg["app_type"] = 1;
+            cfg["appid"] = appid;
+            cfg["uin"] = uin;
+            if (!cfg.ContainsKey("ctime")) cfg["ctime"] = now;
+            if (!cfg.ContainsKey("forward")) cfg["forward"] = 1;
+            if (!cfg.ContainsKey("type")) cfg["type"] = "normal";
+            if (!cfg.ContainsKey("autosize")) cfg["autosize"] = 1;
+            if (!cfg.ContainsKey("token")) cfg["token"] = Guid.NewGuid().ToString("N");
+
+            // meta.music 补全
+            if (node["meta"]?["music"] is JsonObject music)
+            {
+                music["app_type"] = 1;
+                if (!music.ContainsKey("appid")) music["appid"] = appid;
+                if (!music.ContainsKey("ctime")) music["ctime"] = now;
+                if (!music.ContainsKey("uin")) music["uin"] = uin;
+                if (!music.ContainsKey("tagIcon")) music["tagIcon"] = tagIcon;
+            }
+            else if (node["meta"]?["news"] is JsonObject news)
+            {
+                news["app_type"] = 1;
+                if (!news.ContainsKey("appid")) news["appid"] = appid;
+                if (!news.ContainsKey("ctime")) news["ctime"] = now;
+                if (!news.ContainsKey("uin")) news["uin"] = uin;
+                if (!news.ContainsKey("tagIcon")) news["tagIcon"] = tagIcon;
+            }
+
+            return EnsureCardFields(node.ToJsonString(CardJsonOptions));
+        }
+        catch
+        {
+            return EnsureCardFields(cardJson);   // 补全失败则退回基础补全，不破坏原行为
+        }
+    }
+
     /// <summary>签名服务返回的卡片 JSON 兜底补全 prompt/ver/view——
     /// 部分签名实现（尤其是自建/第三方）不返回这三个字段，QQ 端可能不渲染成卡片。已有值不覆盖。</summary>
     private static string? EnsureCardFields(string? cardJson)
@@ -2141,7 +2256,25 @@ public class QQEnhanceModule(
                 "cover=" + Uri.EscapeDataString(string.IsNullOrWhiteSpace(cover)
                     ? "https://p1.music.126.net/6y-UleORITEDbvrOLV0Q8A==/5639395138885805.jpg" : cover)
             };
-            string fullUrl = arkUrl.TrimEnd('?', '&') + "?" + string.Join("&", q);
+            // URL 拼接：剥掉地址里已有的 query（否则会出现两个 ? → 服务端只认第一个，参数全丢）
+            // 同时兼容"用户把 key 直接填进地址"的情况（不再重复追加 key）
+            string arkBase = arkUrl;
+            string arkQuery = "";
+            int qi = arkUrl.IndexOf('?');
+            if (qi >= 0)
+            {
+                arkBase = arkUrl[..qi];
+                arkQuery = arkUrl[(qi + 1)..].TrimEnd('&');
+                // 地址里已带 key=... 时，从中取出作为 token 使用，并从 q 里去掉重复的 key
+                if (arkQuery.Contains("key=", StringComparison.OrdinalIgnoreCase))
+                {
+                    q.RemoveAll(x => x.StartsWith("key=", StringComparison.OrdinalIgnoreCase));
+                    loggerStaticForInfo?.LogDebug("检测到 ARK 地址中已包含 key，优先使用地址内的 key");
+                }
+            }
+            var qFinal = new List<string>(q);
+            if (arkQuery.Length > 0) qFinal.Insert(0, arkQuery);
+            string fullUrl = arkBase + "?" + string.Join("&", qFinal);
             using var resp = await _http.GetAsync(fullUrl);
             if (!resp.IsSuccessStatusCode)
             {
@@ -2197,12 +2330,55 @@ public class QQEnhanceModule(
             req.Headers.TryAddWithoutValidation("Accept", "application/json, text/plain, */*");
             req.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9");
             req.Headers.TryAddWithoutValidation("Cookie", "buvid3=1; b_nut=1");
-            using var resp = await _http.SendAsync(req);
+            // 取真实 buvid3（假 cookie 更易被风控 → -412）。取不到就退回占位值
+            string biliCookie = "buvid3=1; b_nut=1";
+            try
+            {
+                using var homeReq = new HttpRequestMessage(HttpMethod.Get, "https://www.bilibili.com/");
+                homeReq.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
+                using var homeResp = await _http.SendAsync(homeReq);
+                if (homeResp.Headers.TryGetValues("Set-Cookie", out var cookies))
+                {
+                    var parts = new List<string>();
+                    foreach (string c in cookies)
+                    {
+                        string kv = c.Split(';')[0];
+                        if (kv.StartsWith("buvid3=") || kv.StartsWith("b_nut=") || kv.StartsWith("buvid4="))
+                            parts.Add(kv);
+                    }
+                    if (parts.Count > 0)
+                    {
+                        biliCookie = string.Join("; ", parts);
+                        logger.LogDebug("B站 cookie 获取成功");
+                    }
+                }
+            }
+            catch { /* 取不到就用占位值 */ }
+            req.Headers.Remove("Cookie");
+            req.Headers.TryAddWithoutValidation("Cookie", biliCookie);
+
+            HttpResponseMessage resp = await _http.SendAsync(req);
             string body;
             using (var ms = new MemoryStream())
             {
                 await resp.Content.CopyToAsync(ms);
                 body = Encoding.UTF8.GetString(ms.ToArray());
+            }
+            // -412 = B站风控，退避后重试一次（换用新 cookie）
+            if (body.Contains("\"code\":-412"))
+            {
+                logger.LogWarning("B站接口触发风控(-412)，1.5秒后重试一次");
+                await Task.Delay(1500);
+                using var retryReq = new HttpRequestMessage(HttpMethod.Get, url);
+                retryReq.Headers.TryAddWithoutValidation("Referer", $"https://www.bilibili.com/video/{bv}");
+                retryReq.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
+                retryReq.Headers.TryAddWithoutValidation("Accept", "application/json, text/plain, */*");
+                retryReq.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9");
+                retryReq.Headers.TryAddWithoutValidation("Cookie", biliCookie);
+                using var retryResp = await _http.SendAsync(retryReq);
+                using var rms = new MemoryStream();
+                await retryResp.Content.CopyToAsync(rms);
+                body = Encoding.UTF8.GetString(rms.ToArray());
             }
 
             // 解析单独容错：风控/限流时 B站 会返回 HTML 而非 JSON
@@ -2484,6 +2660,24 @@ public class QQEnhanceModule(
     /// <summary>浏览器 UA（B站/腾讯等接口需要，避免被风控）</summary>
     private const string BrowserUa =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+    /// <summary>校验直链是否真实可播：跟随重定向后必须是 audio/* 且大小可观（避免拿到 404 HTML 页）</summary>
+    private static async Task<bool> IsPlayableAudioAsync(string url)
+    {
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.TryAddWithoutValidation("Referer", "https://music.163.com/");
+            req.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
+            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
+            if (!resp.IsSuccessStatusCode) return false;
+            string? mediaType = resp.Content.Headers.ContentType?.MediaType;
+            long? len = resp.Content.Headers.ContentLength;
+            bool audio = mediaType != null && mediaType.StartsWith("audio", StringComparison.OrdinalIgnoreCase);
+            return audio && (len == null || len > 100_000);   // 大于 100KB 才认为是有内容的音频
+        }
+        catch { return false; }
+    }
 
     /// <summary>网易云歌曲ID → 官方 outer 播放外链（302 到实际音频；协议端本地下载，不依赖第三方解析服务）</summary>
     private static string NeteaseOuterUrl(long id) => $"https://music.163.com/song/media/outer/url?id={id}.mp3";

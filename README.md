@@ -65,6 +65,14 @@ QQ 消息 ID 通常是负数（部分协议端为 int32 哈希，同样可能为
 - 撤回合并转发卡片类消息会失败（NapCat 平台限制）
 - 实时消息捕获参考了 [YuYang.QQTools](https://github.com/3026838203/YuYang.QQTools) 的 WebSocket 监听思路，特此致谢
 
+## v4.9.27 更新说明
+
+- **修复 ARK 报「缺少必要参数」**：拼 URL 时若「ARK服务地址」里已带 query（如把 `?key=xxx` 一起填进去），会拼出**两个 `?`** → 服务端只认第一个，后面的 url/song/singer/cover/jump/format 全部丢失。现改为剥掉已有 query 再正确拼接，并**兼容"key 直接填在地址里"**的用法
+- **修复 ARK 卡片显示不完整 / 只能试听（套壳补全）**：ARK 返回的卡片**缺 `extra{appid,uin}` 与 `meta.music` 的 `appid/app_type/ctime/uin/tagIcon`**，QQ 侧可能不按"官方应用卡片"渲染。现新增**套壳补全**：优先取签名服务产出的**完整卡作为模板**（复用其 appid/uin/tagIcon），把 ARK 的内容套进完整结构；无模板时用内置默认值 + bot 自身 uin
+- **修复音频直链失效导致"只能试听"**：此前 `audio` 用的网易云 outer 外链**已实际失效**（实测 `302 → music.163.com/404`，返回 HTML 而非音频；上次仅凭 HTTP 200 误判为可用）。现改为**优先取真实直链**（meting → `music.126.net`）并做**可播校验**（跟随重定向后必须是 `audio/*` 且 >100KB），拿不到真直链才退回 outer
+- **B站：降低 `-412` 风控** —— 先访问 `bilibili.com` 取**真实 `buvid3` cookie**（假 cookie 更易被拦），命中 `-412` 时**退避 1.5 秒自动重试一次**，并在日志中明确提示
+- ARK 优先级保证：只要用户配置了 ARK（开启 + Token），**一定先用 ARK**
+
 ## v4.9.26 更新说明
 
 - **修复：非网易云平台（QQ音乐/酷狗/酷我/咪咕）的卡片用不了 ARK 与签名** —— 两处原因：
