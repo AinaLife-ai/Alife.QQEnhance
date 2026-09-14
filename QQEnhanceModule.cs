@@ -1697,7 +1697,7 @@ public class QQEnhanceModule(
         [Description("消息类型：private或group，可省略，省略时自动判定")] string type = "",
         [Description("音乐平台：search=关键词搜索网易云（推荐）/163=网易云歌曲ID/qq/kugou/migu/kuwo=对应平台原生ID/bilibili=B站视频（musicId 传 BV 号，如 BV15wUXYAEci）")] string platform = "search",
         [Description("歌曲关键词（platform=search时）或平台音乐ID（其他platform时原样透传，不做任何转换）")] string musicId = "",
-        [Description("卡片样式（可选）：custom=自定义卡片/record=语音条/163=原生卡片；省略则用配置默认值。仅对网易云歌曲（platform=search/163）生效，其它平台一律原生卡片。注：custom/163 是否走协议端签名服务由协议端决定（失败会自动降级），record 语音条不依赖签名")] string style = "")
+        [Description("卡片样式（可选，不填则用配置默认值）：163=原生卡片 / custom=自定义卡片 / record=语音条。**显式填写时会按你指定的样式发送**（例如：想发语音条就传 record，想做自定义卡就传 custom），不会强制走其它通道；留空则由配置决定。仅对网易云歌曲（platform=search/163）生效，其它平台一律原生卡片")] string style = "")
     {
         if (!Configuration.MusicCardEnabled) { interactor.Poke("音乐卡片功能已禁用"); return; }
         if (targetId == 0) { interactor.Poke("targetId不能为0"); return; }
@@ -1729,16 +1729,56 @@ public class QQEnhanceModule(
 
         // 样式归一化：只认 163/custom/record（含已废弃的 json 一律按 163）；custom/record 需要网易云歌曲ID与直链，
         // 非网易云平台一律走原生卡片，ID 原样透传
-        string cfgStyle = (string.IsNullOrWhiteSpace(style) ? Configuration.MusicCardStyle : style).Trim().ToLowerInvariant();
+        // bot 是否显式指定了样式（显式指定时尊重 bot 的选择，不强制走 ARK —— 保证 bot 的自主权）
+        bool styleExplicit = !string.IsNullOrWhiteSpace(style);
+        const bool arkForced = false;   // 预留：如需"无视 bot 选择强制 ARK"可改为 true
+        string cfgStyle = (styleExplicit ? style : Configuration.MusicCardStyle).Trim().ToLowerInvariant();
         if (cfgStyle is not ("163" or "custom" or "record")) cfgStyle = "163";
+        // 非网易云平台：custom/record 需要音频直链，若该平台能解析出直链则允许使用；
+        // 解析不到时降级为原生卡片（不静默改样式，会记日志说明原因）
         if (!ncmFamily && cfgStyle != "163")
         {
-            logger.LogDebug("平台 {Platform} 不支持样式 {Style}（该样式只对网易云歌曲生效），本次按原生卡片发送", pf, cfgStyle);
-            cfgStyle = "163";
+            logger.LogDebug("平台 {Platform} 请求了样式 {Style}，将尝试解析该平台的音频直链", pf, cfgStyle);
         }
 
 
         bool isGroup = await DetectIsGroupAsync(targetId, type);
+
+        // 歌曲信息变量（所有分支共用；在分支前统一填充）
+        long ncmId = 0;
+        string songTitle = "", songArtist = "", songCover = "", playUrl = "";
+        string otherJumpUrl = "";   // 非网易云平台的跳转链接（供 ARK 使用）
+        bool resolved = false;
+
+        // ===== 统一先解析歌曲信息（供 ARK / 签名 / custom / record 共用，避免走不同分支时字段缺失）=====
+        // platform=search 需要先把关键词转成网易云歌曲ID
+        if (pf == "search")
+        {
+            ncmId = await SearchNetEaseIdAsync(musicId, logger);
+            if (ncmId == 0)
+            {
+                interactor.Poke($"未找到歌曲：{musicId}。可换个更短的关键词重试（只用歌名或只用歌手名），若多次失败说明搜索接口暂时不可用，可稍后再试");
+                return;
+            }
+        }
+        else if (pf == "163")
+        {
+            _ = long.TryParse(musicId.Trim(), out ncmId);
+        }
+
+        if (ncmFamily && ncmId != 0)
+        {
+            (songTitle, songArtist, songCover) = await GetNcmSongDetailAsync(ncmId);
+            string? directUrl = await ResolveNcmUrlAsync(ncmId);
+            playUrl = !string.IsNullOrEmpty(directUrl) && await IsPlayableAudioAsync(directUrl)
+                ? directUrl
+                : NeteaseOuterUrl(ncmId);
+        }
+        else if (!ncmFamily)
+        {
+            var (ot, oa, oc, oj, op) = await ResolveOtherPlatformInfoAsync(pf, musicId.Trim());
+            songTitle = ot; songArtist = oa; songCover = oc; otherJumpUrl = oj; playUrl = op;
+        }
 
         // B站：自建通用图文卡（news）——**始终不走 ARK、也不走签名服务**
         // 原因：第三方签名服务不认识 B站，会按"QQ音乐图文卡"兜底产出错误的 appid/tag 并代理封面
@@ -1754,11 +1794,6 @@ public class QQEnhanceModule(
             return;
         }
 
-        // 网易云歌曲信息：解析一次，主流程与降级共用（降级不再产生任何额外请求）
-        long ncmId = 0;
-        string songTitle = "", songArtist = "", songCover = "", playUrl = "";
-        string otherJumpUrl = "";   // 非网易云平台的跳转链接（供 ARK 使用）
-        bool resolved = false;
         async Task<bool> ResolveSongAsync()
         {
             if (resolved) return ncmId != 0;
@@ -1778,7 +1813,8 @@ public class QQEnhanceModule(
         object BuildCustomCard() => new object[] {
             new { type = "music", data = new {
                 type = "custom",
-                url = $"https://music.163.com/song?id={ncmId}",
+                url = ncmId != 0 ? $"https://music.163.com/song?id={ncmId}"
+                     : (otherJumpUrl.Length > 0 ? otherJumpUrl : musicId),
                 audio = playUrl,
                 title = songTitle,
                 content = songArtist,
@@ -1816,6 +1852,8 @@ public class QQEnhanceModule(
         async Task<object?> TryArkAsync(string platformType, string cardId)
         {
             if (!Configuration.MusicArkEnabled || string.IsNullOrWhiteSpace(Configuration.MusicArkToken)) return null;
+            // bot 显式指定样式时不用 ARK（由调用方决定，保证 bot 自主权）
+            if (styleExplicit && !arkForced) return null;
             if (_arkBroken)
             {
                 logger.LogDebug("ARK 通道此前已失败，本次跳过（如需重试请在配置中关闭再开启该通道）");
@@ -1943,31 +1981,9 @@ public class QQEnhanceModule(
         // ===== 样式 163 / 所有非网易云平台：原生卡片，ID 原样透传 =====
         if (cfgStyle == "163")
         {
-            string cardId = musicId.Trim();
-            if (pf == "search")
-            {
-                ncmId = await SearchNetEaseIdAsync(musicId, logger);
-                if (ncmId == 0)
-                {
-                    interactor.Poke($"未找到歌曲：{musicId}。可换个更短的关键词重试（只用歌名或只用歌手名），若多次失败说明搜索接口暂时不可用，可稍后再试");
-                    return;
-                }
-                cardId = ncmId.ToString();
-            }
+            string cardId = pf == "search" ? ncmId.ToString() : musicId.Trim();
 
-            // 先解析歌曲信息（签名/ARK 用 custom 形式提供字段，VIP 歌也能签成功）
-            if (ncmFamily)
-            {
-                await ResolveSongAsync();
-            }
-            else
-            {
-                // 非网易云平台：解析歌名/歌手/封面（此前留空会被签名服务当缺参拒绝，并连累 ARK 被误判不可用）
-                var (ot, oa, oc, oj, op) = await ResolveOtherPlatformInfoAsync(pf, cardId);
-                songTitle = ot; songArtist = oa; songCover = oc;
-                playUrl = op;        // 非网易云通常拿不到直链；留空（record 降级时无直链会自动跳过，不会发出坏语音）
-                otherJumpUrl = oj;
-            }
+            // 歌曲信息已在分支前统一解析（见上方"统一先解析歌曲信息"）
 
             var r1 = await SendAsync(await BuildNativeCardAsync(pf == "search" ? "163" : pf, cardId));
             if (r1.ok) return;
@@ -2004,14 +2020,33 @@ public class QQEnhanceModule(
             return;
         }
 
-        // ===== 样式 custom / record（仅网易云平台）=====
-        if (!await ResolveSongAsync())
+        // ===== 样式 custom / record =====
+        // 歌曲信息已在分支前统一解析；这里只检查非网易云是否拿到了可播放直链
+        if (ncmFamily)
         {
-            interactor.Poke($"未找到歌曲：{musicId}。可换个更短的关键词重试（只用歌名或只用歌手名），若多次失败说明搜索接口暂时不可用，可稍后再试");
+            if (ncmId == 0)
+            {
+                interactor.Poke($"未找到歌曲：{musicId}。可换个更短的关键词重试（只用歌名或只用歌手名）");
+                return;
+            }
+        }
+        else if (string.IsNullOrWhiteSpace(playUrl))
+        {
+            // 非网易云且拿不到直链：custom/record 都需要音频地址 → 改走原生卡片分支
+            logger.LogWarning("平台 {Platform} 未能解析出音频直链，样式 {Style} 无法使用，改用原生卡片", pf, cfgStyle);
+            // 只有 bot 显式要求该样式时才告知（配置默认导致的降级不打扰 AI）
+            if (styleExplicit)
+                interactor.Poke($"该平台（{pf}）暂未取到可播放的音频直链，无法使用 {cfgStyle} 样式，已按原生卡片发送");
+            object fallbackCard = await BuildNativeCardAsync(pf, musicId.Trim());
+            var rFb = await SendAsync(fallbackCard);
+            if (!rFb.ok && rFb.reason != "timeout") interactor.Poke($"音乐卡片发送失败：{rFb.reason}");
             return;
         }
-        // ②' ARK 统一最高优先级：custom/record 样式同样先试 ARK（网易云歌曲信息此时已解析）
-        object? arkStyle = await TryArkAsync("163", ncmId.ToString());
+        // ARK 仅在「bot 未显式指定样式」时介入（配置默认走 ARK，保证 ARK 优先）；
+        // bot 明确要求 custom/record 时尊重其选择（例如它就是想发语音条）
+        object? arkStyle = styleExplicit ? null : await TryArkAsync("163", ncmId.ToString());
+        if (styleExplicit)
+            logger.LogDebug("bot 显式指定样式 {Style}，跳过 ARK 通道（尊重调用方选择）", cfgStyle);
         var rC = await SendAsync(arkStyle ?? (cfgStyle == "record" ? BuildRecord() : BuildCustomCard()));
         if (rC.ok) return;
         if (rC.reason == "timeout") { interactor.Poke(timeoutHint); return; }

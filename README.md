@@ -65,6 +65,19 @@ QQ 消息 ID 通常是负数（部分协议端为 int32 哈希，同样可能为
 - 撤回合并转发卡片类消息会失败（NapCat 平台限制）
 - 实时消息捕获参考了 [YuYang.QQTools](https://github.com/3026838203/YuYang.QQTools) 的 WebSocket 监听思路，特此致谢
 
+## v4.9.28 更新说明
+
+- **bot 样式自主权**：开了 ARK 之后，bot 仍可自行决定卡片形式——
+  | 调用方式 | 结果 |
+  |---|---|
+  | `SendMusicCard musicId="晴天"`（不填 style） | 按配置（配了 ARK 则 **ARK 优先**） |
+  | `SendMusicCard musicId="晴天" style="record"` | **语音条**（bot 明确要求，不受 ARK 影响） |
+  | `SendMusicCard musicId="晴天" style="custom"` | **自定义卡片**（同上） |
+  | `SendMusicCard musicId="晴天" style="163"` | 原生卡片（同上） |
+  「音乐卡片」函数描述已同步说明，bot 知道可以自己选
+- **非网易云平台（QQ音乐/酷狗等）也支持 custom/record**：此前被强制改回原生卡片，现在只要该平台能解析出音频直链就允许使用；拿不到直链时按原生卡片发送（bot 显式要求时会说明原因，配置默认导致的降级只记日志、不打扰 AI）
+- **修复：非网易云平台走 custom/record 分支时歌曲信息为空** —— 此前"平台信息解析"只写在 163 分支内，走其它分支时从不解析，导致 ARK/签名服务拿到空字段被拒。现改为**无论走哪个分支都先统一解析一次**（网易云：歌名/歌手/封面/直链；其它平台：歌名/歌手/封面/跳转），字段复用、不重复请求
+
 ## v4.9.27 更新说明
 
 - **修复 ARK 报「缺少必要参数」**：拼 URL 时若「ARK服务地址」里已带 query（如把 `?key=xxx` 一起填进去），会拼出**两个 `?`** → 服务端只认第一个，后面的 url/song/singer/cover/jump/format 全部丢失。现改为剥掉已有 query 再正确拼接，并**兼容"key 直接填在地址里"**的用法
