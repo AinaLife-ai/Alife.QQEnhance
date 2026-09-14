@@ -1927,30 +1927,59 @@ public class QQEnhanceModule(
 
         // 发送一次并判定结果：ok=协议端已接受（retcode 0，协议端没回 message_id 也算成功）；
         // rejected=平台明确拒绝（肯定没送达，可安全降级）；reason="timeout" 表示未收到响应（不确定是否已发出）
-        async Task<(bool ok, bool rejected, string reason)> SendAsync(object message)
+        async Task<(bool ok, bool rejected, string reason, long attemptAt)> SendAsync(object message)
         {
             object sendParams = isGroup ? new { group_id = targetId, message } : new { user_id = targetId, message };
+            long attemptAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();   // 发起时间（超时后核验用）
             try
             {
                 SendResult? sent = await client.CallActionAsync<SendResult>("send_msg", sendParams);
                 long sentId = ExtractSentId(sent);
                 if (sentId != 0)
                     RecordSentMessage(sentId, isGroup ? targetId : 0, isGroup ? 0 : targetId, $"[音乐 {pf}:{musicId}]");
-                return (true, false, "");
+                return (true, false, "", attemptAt);
             }
             catch (TaskCanceledException)
             {
-                return (false, false, "timeout");
+                // 注意：超时只是"没收到 OneBot 回执"。record 需下载音频+转码，回执常迟于实际发送，
+                // 因此超时 ≠ 未发出（由调用方核验）
+                return (false, false, "timeout", attemptAt);
             }
             catch (Exception e)
             {
                 // 框架对 retcode≠0 的固定文案「调用失败 (RetCode: x) - msg」→ 平台明确拒绝，肯定没送达
                 bool rejected = e.Message.Contains("调用失败 (RetCode:", StringComparison.Ordinal);
-                return (false, rejected, e.Message);
+                return (false, rejected, e.Message, attemptAt);
             }
         }
 
-        const string timeoutHint = "音乐卡片请求超时（10秒未收到协议端响应）。卡片可能稍后出现，请先用 QGetMessages 确认，不要重复发送";
+        /// <summary>超时后核验消息是否已实际发出：回拉历史，看本会话在 attemptAt 之后有没有 bot 自己的消息。
+        /// 找到即认为已发出（避免误报"没发出来"）；核验只做一轮短等待，不拖慢交互</summary>
+        async Task<bool> VerifySentAsync(long attemptAt)
+        {
+            try
+            {
+                for (int i = 0; i < 2; i++)
+                {
+                    await BackfillHistoryAsync(isGroup ? targetId : 0, isGroup ? 0 : targetId, 10);
+                    long botId = GetBotId();
+                    bool found = _liveMessages.Any(m => m.IsSelf
+                        && (isGroup ? m.GroupId == targetId : (m.GroupId == 0 && m.PeerId == targetId))
+                        && m.Time >= attemptAt - 3);
+                    if (found) return true;
+                    if (i == 0) await Task.Delay(2000);   // 给协议端一点时间落库
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "超时后核验发送结果失败（按未确认处理）");
+            }
+            return false;
+        }
+
+        // 超时文案：明确"已发出、只是回执慢"，避免 bot 误判成失败后重复发送或向用户报告失败
+        const string timeoutUnverifiedHint = "音乐卡片未在10秒内收到协议端回执（注意：回执慢≠未发出，语音条需要下载转码通常更慢）。消息很可能已发出，请勿重复发送；如需确认可用 QGetMessages 查看";
+        const string timeoutVerifiedHint = "音乐卡片已发出（协议端回执较慢，已通过历史核验确认），无需重复发送";
 
         /// <summary>协议端明确拒绝后：尝试公共签名兜底重发（成功即沿用，失败则记录并切回原通道）。
         /// 返回 true 表示已重发成功，调用方直接结束</summary>
@@ -1973,7 +2002,13 @@ public class QQEnhanceModule(
             _preferPluginSign = true;
             var r = await SendAsync(new object[] { new { type = "json", data = new { data = signedJson } } });
             if (r.ok) return true;
-            if (r.reason == "timeout") { interactor.Poke(timeoutHint); return true; }   // 已尝试发出，不再叠加其它动作
+            if (r.reason == "timeout")
+            {
+                // 兜底重发的场景：核验到已发出就静默（避免误报）
+                if (await VerifySentAsync(r.attemptAt)) logger.LogInformation("公共签名卡片超时但已核验发出");
+                else interactor.Poke(timeoutUnverifiedHint);
+                return true;
+            }
             logger.LogWarning("公共签名卡片发送失败：{Reason}", r.reason);
             return false;
         }
@@ -1987,7 +2022,12 @@ public class QQEnhanceModule(
 
             var r1 = await SendAsync(await BuildNativeCardAsync(pf == "search" ? "163" : pf, cardId));
             if (r1.ok) return;
-            if (r1.reason == "timeout") { interactor.Poke(timeoutHint); return; }
+            if (r1.reason == "timeout")
+            {
+                if (await VerifySentAsync(r1.attemptAt)) interactor.Poke(timeoutVerifiedHint);
+                else interactor.Poke(timeoutUnverifiedHint);
+                return;
+            }
 
             // 先尝试"公共签名兜底"（针对协议端未配置签名服务这类情况）
             if (r1.rejected && await TryFallbackSignAsync(pf == "search" ? "163" : pf, cardId, r1.reason))
@@ -2002,13 +2042,23 @@ public class QQEnhanceModule(
                 {
                     var r2 = await SendAsync(BuildCustomCard());
                     if (r2.ok) return;
-                    if (r2.reason == "timeout") { interactor.Poke(timeoutHint); return; }
+                    if (r2.reason == "timeout")
+                    {
+                        if (await VerifySentAsync(r2.attemptAt)) interactor.Poke(timeoutVerifiedHint);
+                        else interactor.Poke(timeoutUnverifiedHint);
+                        return;
+                    }
                     if (r2.rejected)
                     {
                         logger.LogWarning("custom 卡片也被拒绝（{Reason}），降级语音条重发", r2.reason);
                         var r3 = await SendAsync(BuildRecord());
                         if (r3.ok) return;
-                        if (r3.reason == "timeout") { interactor.Poke(timeoutHint); return; }
+                        if (r3.reason == "timeout")
+                        {
+                            if (await VerifySentAsync(r3.attemptAt)) interactor.Poke(timeoutVerifiedHint);
+                            else interactor.Poke(timeoutUnverifiedHint);
+                            return;
+                        }
                         interactor.Poke($"音乐卡片发送失败：{r3.reason}");
                         return;
                     }
@@ -2049,13 +2099,23 @@ public class QQEnhanceModule(
             logger.LogDebug("bot 显式指定样式 {Style}，跳过 ARK 通道（尊重调用方选择）", cfgStyle);
         var rC = await SendAsync(arkStyle ?? (cfgStyle == "record" ? BuildRecord() : BuildCustomCard()));
         if (rC.ok) return;
-        if (rC.reason == "timeout") { interactor.Poke(timeoutHint); return; }
+        if (rC.reason == "timeout")
+        {
+            if (await VerifySentAsync(rC.attemptAt)) interactor.Poke(timeoutVerifiedHint);
+            else interactor.Poke(timeoutUnverifiedHint);
+            return;
+        }
         if (rC.rejected && cfgStyle == "custom")
         {
             logger.LogWarning("custom 卡片被协议端拒绝（{Reason}），降级语音条重发", rC.reason);
             var rR = await SendAsync(BuildRecord());
             if (rR.ok) return;
-            if (rR.reason == "timeout") { interactor.Poke(timeoutHint); return; }
+            if (rR.reason == "timeout")
+            {
+                if (await VerifySentAsync(rR.attemptAt)) interactor.Poke(timeoutVerifiedHint);
+                else interactor.Poke(timeoutUnverifiedHint);
+                return;
+            }
             interactor.Poke($"音乐卡片发送失败：{rR.reason}");
             return;
         }
