@@ -149,6 +149,12 @@ public class QQEnhanceConfig
     [Description("主动戳人（含回戳）后，N秒内收到同一人的戳通知视为我方动作的回执回声而忽略（防NapCat私聊通知方向字段不规范时把回执当成新戳造成回圈；0=不抑制）")]
     public int PokeEchoSuppressSeconds { get; set; } = 3;
 
+    [DisplayName("戳回执不触发对话（私聊）")]
+    [Description("自己戳人后，协议端会回推一条戳回执，官方会把它当成一条消息——主人私聊还会立即开一轮对话。" +
+        "开启后把这条回执从官方私聊缓冲里摘掉，缓冲区为空则官方直接跳过，从而不再因自己的动作多触发一轮。" +
+        "摘除失败会自动退化为「仅剔除消息内容」（不会出现方向错误的脏内容）。群聊不处理（群聊渲染带发起者，语义本来就对）")]
+    public bool PokeEchoDropTurnEnabled { get; set; } = true;
+
     [DisplayName("被赞感知")]
     [Description("感知资料卡被点赞并提示AI可回赞（走官方连接事件，无需额外上报），默认关闭")]
     public bool PerceiveProfileLike { get; set; } = false;
@@ -739,6 +745,67 @@ public class QQEnhanceModule(
         return 0;
     }
 
+    /// <summary>尝试把“我方戳动作回执”从官方私聊缓冲里摘掉：缓冲区被摘空后，官方 FlushPrivateMessage 会
+    /// 直接 return（Count==0），于是不再因为自己的动作多触发一轮对话。
+    /// 只在能精确匹配（整行等于“戳了戳 {被戳者}”）时删一条；任何异常或结构不符都静默放弃——
+    /// 放弃时仍有 ChatSend 内容剔除兜底，不会出现方向错误的脏内容</summary>
+    private bool TryStripPokeEchoFromPrivateBuffer(long peerId, long targetId)
+    {
+        if (!Configuration.PokeEchoDropTurnEnabled || targetId == 0) return false;
+        try
+        {
+            FieldInfo? field = typeof(QChatService).GetField("privateStates",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            if (field?.GetValue(qChatService) is not System.Collections.IDictionary states) return false;
+            object? source = states[peerId];
+            if (source == null) return false;
+            PropertyInfo? bufferProp = source.GetType().GetProperty("MessageBuffer");
+            if (bufferProp?.GetValue(source) is not System.Collections.IList buffer) return false;
+
+            string expect = "戳了戳 " + targetId;
+            for (int i = buffer.Count - 1; i >= 0; i--)
+            {
+                if (buffer[i] is string line && string.Equals(line.TrimEnd('\r'), expect, StringComparison.Ordinal))
+                {
+                    buffer.RemoveAt(i);
+                    logger.LogDebug("已从官方私聊缓冲摘除我方戳回执（不再多触发一轮对话）：peer={Peer} target={Target}",
+                        peerId, targetId);
+                    return true;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            logger.LogDebug(e, "摘除私聊缓冲里的戳回执失败（忽略；内容仍由 ChatSend 兜底剔除）");
+        }
+        return false;
+    }
+
+    /// <summary>调度“摘除我方戳回执”（私聊）。先立即试一次（订阅顺序正确时同一轮派发内就能命中），
+    /// 未命中再按小间隔重试，覆盖订阅顺序不利/官方 flush 抢先的情形。
+    /// 全部未命中也只是退化成“多一轮无脏内容的对话”，不会更差</summary>
+    private void SchedulePokeEchoTurnDrop(long peerId, long targetId)
+    {
+        if (!Configuration.PokeEchoDropTurnEnabled || targetId == 0) return;
+        if (TryStripPokeEchoFromPrivateBuffer(peerId, targetId)) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                foreach (int delay in new[] { 20, 60, 150 })
+                {
+                    await Task.Delay(delay);
+                    if (TryStripPokeEchoFromPrivateBuffer(peerId, targetId)) return;
+                }
+                logger.LogDebug("私聊戳回执未能及时摘除（官方已抢先 flush）——本次会多一轮对话，内容已由 ChatSend 清理");
+            }
+            catch (Exception e)
+            {
+                logger.LogDebug(e, "延时摘除私聊戳回执失败（忽略）");
+            }
+        });
+    }
+
     /// <summary>取出待回应的戳请求（默认最近一次；target&gt;0 时按对象精确指定）。过期即丢弃</summary>
     private PokeRequest? TakePendingPoke(long target, out string? error)
     {
@@ -945,6 +1012,23 @@ public class QQEnhanceModule(
         catch (Exception e)
         {
             logger.LogWarning(e, "扩展QChat回复格式规则失败（不影响其他功能）");
+        }
+
+        // 把本插件的事件订阅移到委托链末尾：官方 QChat 的 OnEventReceived 是 async void，且 poke 分支全程同步
+        // （无 await），排在它之后才能在同一轮派发里、官方刚把回执写进缓冲后就摘掉它
+        try
+        {
+            OneBotClient? client = GetClient();
+            if (client != null)
+            {
+                client.EventReceived -= OnEventReceived;
+                client.EventReceived += OnEventReceived;
+                logger.LogDebug("QQ增强：事件订阅已移至委托链末尾（确保晚于官方处理，便于摘除我方戳回执）");
+            }
+        }
+        catch (Exception e)
+        {
+            logger.LogWarning(e, "调整事件订阅顺序失败（不影响其他功能；戳回执改为延时摘除）");
         }
         return Task.CompletedTask;
     }
@@ -3262,6 +3346,10 @@ public class QQEnhanceModule(
                     // 这里登记待剔除条目，由 ChatSend 钩子在消息进入上下文前精确剔除——
                     // 否则 AI 会读到一条方向错误的消息并被错误触发
                     MarkPokeEchoForStrip(noticeEvent.UserId, targetId);
+                    // 私聊再多做一步：把回执行从官方缓冲里摘掉，连那一轮对话也不触发。
+                    // 群聊不处理——群聊渲染带发起者（“[自己QQ]:戳了戳 X”），语义本来就对
+                    if (noticeEvent.GroupId == 0)
+                        SchedulePokeEchoTurnDrop(noticeEvent.UserId, targetId);
                     logger.LogDebug("我方发起的poke（含自戳/回戳回执）：sender={Sender} peer={Peer} target={Target}，已登记剔除，不触发被戳流程",
                         senderId, noticeEvent.UserId, targetId);
                     return;
