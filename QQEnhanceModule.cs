@@ -664,7 +664,10 @@ public class QQEnhanceModule(
 
     // ==================== 戳回决策状态 ====================
     private sealed record PokeRequest(long UserId, long GroupId, bool IsGroup, DateTime Time);
-    private PokeRequest? _lastPokeRequest;
+    /// <summary>待回应的戳请求：按会话索引（私聊=对端QQ / 群聊=群号）。
+    /// 早期是单槽全局，多会话连续被戳时后到的会覆盖先到的 ⇒ PokeBack 可能戳错人</summary>
+    private readonly Dictionary<string, PokeRequest> _pendingPokes = new();
+    private static readonly TimeSpan PokeRequestTtl = TimeSpan.FromMinutes(10);
     private DateTime _lastPokePromptTime = DateTime.MinValue;
     private readonly object _pokeLock = new();
     /// <summary>插件近期主动发出的戳一戳（目标QQ, 时间），用于回执回声抑制</summary>
@@ -672,7 +675,33 @@ public class QQEnhanceModule(
     /// <summary>戳一戳防刷滑动窗口：(用户QQ, 群号) → 受理时间列表</summary>
     private readonly Dictionary<(long UserId, long GroupId), List<DateTime>> _pokeFlood = new();
 
-    /// <summary>记录一次插件主动发出的戳一戳（供回执回声抑制判定）</summary>
+    /// <summary>我方戳动作的回执“待剔除”条目：官方 QChat 会把 poke 回执渲染成一条会话消息
+    /// （私聊还不带发起者，显示成“对端 戳了戳 对端”），需在它进入 AI 上下文前精确剔除</summary>
+    private sealed class PokeEcho
+    {
+        public long PeerId;
+        public long TargetId;
+        public DateTime Time = DateTime.Now;
+        public bool Used;
+        public PokeEcho(long peerId, long targetId) { PeerId = peerId; TargetId = targetId; }
+    }
+    private readonly List<PokeEcho> _pokeEchoStrips = new();
+    private static readonly Regex PrivateMsgTagRegex = new(@"\[私聊消息\((\d+)", RegexOptions.Compiled);
+
+    private static string PokeSessionKey(bool isGroup, long scopeId) => (isGroup ? "group:" : "private:") + scopeId;
+
+    /// <summary>“戳一戳由幼央接管”提示。幼央的私聊/群聊函数名与本插件不同，故用泛化措辞，
+    /// 避免把 AI 引到本插件自己的函数上（此前 PokeBack 里写死的是 PokeGroupMember，本就指错）</summary>
+    private const string PokeDelegateHint =
+        "戳一戳功能由 YuYang.QQTools（幼央工具箱）接管，请按幼央的函数列表选择对应的戳一戳函数（群聊/私聊各不相同），不要调用本插件的 PokeGroupMember/PokePrivateMember";
+
+    private bool IsSelfQQ(long userId)
+    {
+        long botId = GetBotId();
+        return botId != 0 && userId == botId;
+    }
+
+    /// <summary>记录一次插件主动发出的戳一戳（仅在动作成功后调用——失败也记会过度抑制对方真实的戳）</summary>
     private void MarkOutgoingPoke(long userId)
     {
         lock (_pokeLock)
@@ -680,6 +709,120 @@ public class QQEnhanceModule(
             _recentOutgoingPokes.RemoveAll(p => (DateTime.Now - p.Time).TotalMinutes > 2);
             _recentOutgoingPokes.Add((userId, DateTime.Now));
         }
+    }
+
+    /// <summary>登记一条“我方戳动作回执”待剔除条目（peer=会话对端，target=被戳者）。
+    /// 只有我方发起的动作才会登记，因此不会误伤对方真实的戳</summary>
+    private void MarkPokeEchoForStrip(long peerId, long targetId)
+    {
+        if (targetId == 0) return;
+        lock (_pokeLock)
+        {
+            _pokeEchoStrips.RemoveAll(e => (DateTime.Now - e.Time).TotalSeconds > 30);
+            _pokeEchoStrips.Add(new PokeEcho(peerId, targetId));
+        }
+    }
+
+    /// <summary>从 RawJson 读取 NapCat 私聊戳的扩展字段 sender_id（框架事件模型未映射它，
+    /// 但 RawJson 是官方为“模型未覆盖字段”预留的取数通道）。
+    /// 私聊戳的 user_id 恒为会话对端（与谁戳谁无关），方向只能靠 sender_id 判断；返回 0=协议端未提供</summary>
+    private static long TryReadSenderId(string? rawJson)
+    {
+        if (string.IsNullOrWhiteSpace(rawJson)) return 0;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(rawJson);
+            if (doc.RootElement.TryGetProperty("sender_id", out JsonElement v) && v.TryGetInt64(out long s))
+                return s;
+        }
+        catch { /* 报文非 JSON 或结构异常：回落到旧规则 */ }
+        return 0;
+    }
+
+    /// <summary>取出待回应的戳请求（默认最近一次；target&gt;0 时按对象精确指定）。过期即丢弃</summary>
+    private PokeRequest? TakePendingPoke(long target, out string? error)
+    {
+        error = null;
+        List<PokeRequest> all;
+        lock (_pokeLock)
+        {
+            DateTime now = DateTime.Now;
+            foreach (string k in _pendingPokes.Where(kv => (now - kv.Value.Time) > PokeRequestTtl).Select(kv => kv.Key).ToList())
+                _pendingPokes.Remove(k);
+            all = _pendingPokes.Values.ToList();
+        }
+        if (all.Count == 0) { error = "没有待回应的戳一戳（可能已过期或已处理）"; return null; }
+
+        PokeRequest? req = null;
+        if (target > 0)
+        {
+            req = all.Where(r => r.UserId == target).OrderByDescending(r => r.Time).FirstOrDefault();
+            if (req == null) { error = $"没有来自 {target} 的待回应戳一戳（可能已过期/已处理，或该QQ没有戳过你）"; return null; }
+        }
+        req ??= all.OrderByDescending(r => r.Time).First();
+        lock (_pokeLock)
+            _pendingPokes.Remove(PokeSessionKey(req.IsGroup, req.IsGroup ? req.GroupId : req.UserId));
+        return req;
+    }
+
+    /// <summary>清除待回应戳请求（target&gt;0 只清该对象，否则全清）</summary>
+    private void ClearPendingPoke(long target)
+    {
+        lock (_pokeLock)
+        {
+            if (target <= 0) { _pendingPokes.Clear(); return; }
+            foreach (string k in _pendingPokes.Where(kv => kv.Value.UserId == target).Select(kv => kv.Key).ToList())
+                _pendingPokes.Remove(k);
+        }
+    }
+
+    /// <summary>剔除“我方戳动作回执”被官方渲染成的那行（例：私聊里 “戳了戳 主人QQ”）。
+    /// 挂在官方 ChatBot.ChatSend 钩子上——消息进入 AI 上下文之前执行，无并发风险。
+    /// 三条件同时满足才删：①当前私聊块对端==条目对端 ②整行完全等于“戳了戳 {target}” ③条目未过期且未用过。
+    /// 匹配不到就原样返回（行为等同修复前，绝不劣化）</summary>
+    private string StripPokeEchoLines(string message)
+    {
+        if (string.IsNullOrEmpty(message) || message.IndexOf("戳了戳", StringComparison.Ordinal) < 0)
+            return message;
+
+        List<PokeEcho> pending;
+        lock (_pokeLock)
+        {
+            _pokeEchoStrips.RemoveAll(e => (DateTime.Now - e.Time).TotalSeconds > 30);
+            pending = _pokeEchoStrips.Where(e => !e.Used).ToList();
+        }
+        if (pending.Count == 0) return message;
+
+        string[] lines = message.Split('\n');
+        long currentPeer = 0;
+        int removed = 0;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = lines[i];
+            Match tag = PrivateMsgTagRegex.Match(line);
+            if (tag.Success)
+            {
+                currentPeer = long.TryParse(tag.Groups[1].Value, out long pid) ? pid : 0;
+                continue;
+            }
+            // 新的注入块开始且不是私聊标签 ⇒ 其后散行不属于任何私聊块
+            if (line.IndexOf("[消息来源(", StringComparison.Ordinal) >= 0) { currentPeer = 0; continue; }
+            if (currentPeer == 0) continue;
+
+            string text = line.TrimEnd('\r').Trim();
+            foreach (PokeEcho echo in pending)
+            {
+                if (echo.PeerId != currentPeer) continue;
+                if (!string.Equals(text, "戳了戳 " + echo.TargetId, StringComparison.Ordinal)) continue;
+                lines[i] = "";
+                lock (_pokeLock) echo.Used = true;
+                removed++;
+                break;
+            }
+        }
+        if (removed == 0) return message;
+        logger.LogDebug("已剔除 {Count} 行我方戳一戳回执（官方渲染的会话消息），避免 AI 误判为被戳", removed);
+        return string.Join("\n", lines);
     }
 
     protected override Task OnAwake()
@@ -742,6 +885,10 @@ public class QQEnhanceModule(
             ChatBot.ChatSent += OnChatSent;
             ChatBot.ChatOver += OnChatOver;
         }
+
+        // 回执剔除：挂到官方消息过滤钩子（ChatBot.ChatSend）——剔除“我方戳动作回执”被官方渲染出的那行，
+        // 必须在互动提示之前执行（先清干净再附加提示）
+        ChatBot.ChatSend += StripPokeEchoLines;
 
         // 互动提示：挂到官方消息过滤同款钩子（ChatBot.ChatSend），收到QQ消息时按概率附加提示
         ChatBot.ChatSend += OnChatSendHint;
@@ -810,6 +957,7 @@ public class QQEnhanceModule(
 
         ChatBot.ChatSent -= OnChatSent;
         ChatBot.ChatOver -= OnChatOver;
+        ChatBot.ChatSend -= StripPokeEchoLines;
         ChatBot.ChatSend -= OnChatSendHint;
 
         // 恢复官方QChat纠错规则（OnStart 中替换过）——只移除本插件添加的那条扩展规则，
@@ -1285,70 +1433,75 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("戳一戳群成员。想引起对方注意、打招呼、催回复、表达'我来啦/我赞同'时随手戳，比打字更轻快")]
+    [Description("戳一戳群成员。想引起对方注意、打招呼、催回复、表达'我来啦/我赞同'时随手戳，比打字更轻快。userId 可传自己（自戳）")]
     public async Task PokeGroupMember(
         [Description("群号")] long groupId,
         [Description("QQ号")] long userId)
     {
         if (!Configuration.PokeEnabled) { interactor.Poke("戳一戳功能已禁用"); return; }
-        if (ShouldDelegate()) { interactor.Poke(DelegateHint("戳一戳", "PokeGroupMember")); return; }
+        if (ShouldDelegate()) { interactor.Poke(PokeDelegateHint); return; }
+        if (groupId <= 0) { interactor.Poke("请传有效的群号（戳群成员需要 groupId）"); return; }
+        if (userId <= 0) { interactor.Poke("请传有效的QQ号"); return; }
         OneBotClient? client = GetClient();
-        MarkOutgoingPoke(userId);
         string? err = await CallActionSafeAsync("group_poke", new { group_id = groupId, user_id = userId }, "戳一戳", client);
-        if (err != null) interactor.Poke(err);
+        if (err != null) { interactor.Poke(err); return; }
+        MarkOutgoingPoke(userId); // 成功后记录（失败也记会过度抑制对方真实的戳）
+        if (IsSelfQQ(userId))
+            logger.LogDebug("群 {Group} 自戳动作完成（自戳允许；其回执由 sender_id 判定，不会触发被戳流程）", groupId);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("私聊戳一戳指定用户。私聊里打招呼、提醒看消息时随手用")]
+    [Description("私聊戳一戳指定用户。私聊里打招呼、提醒看消息时随手用。userId 传对方QQ；传自己的QQ 即为自戳")]
     public async Task PokePrivateMember(
         [Description("QQ号")] long userId)
     {
         if (!Configuration.PokeEnabled) { interactor.Poke("戳一戳功能已禁用"); return; }
+        if (ShouldDelegate()) { interactor.Poke(PokeDelegateHint); return; }
+        if (userId <= 0) { interactor.Poke("请传有效的QQ号"); return; }
         OneBotClient? client = GetClient();
-        MarkOutgoingPoke(userId);
         string? err = await CallActionSafeAsync("friend_poke", new { user_id = userId }, "私聊戳一戳", client);
-        if (err != null) interactor.Poke(err);
+        if (err != null) { interactor.Poke(err); return; }
+        MarkOutgoingPoke(userId);
+        MarkPokeEchoForStrip(userId, userId); // 兜底：协议端不给 sender_id 时也能认出这条回执
+        if (IsSelfQQ(userId))
+            logger.LogDebug("私聊自戳动作完成（自戳允许；其回执会被剔除，不会触发被戳流程）");
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("回应最近一次戳你的人：回戳或忽略。当系统提示你被戳了时调用。decide=\"yes\"回戳；decide=\"no\"忽略。只用于回应戳一戳，不用于主动戳人")]
+    [Description("回应最近一次戳你的人：回戳或忽略。当系统提示你被戳了时调用。decide=\"yes\"回戳；decide=\"no\"忽略。只用于回应戳一戳，主动戳人请用 PokeGroupMember/PokePrivateMember")]
     public async Task PokeBack(
-        [Description("yes=回戳，no=忽略")] string decide = "yes")
+        [Description("yes=回戳，no=忽略")] string decide = "yes",
+        [Description("可选：指定回戳对象QQ（多个会话同时被戳时用它精确指定；缺省取最近一次）")] long target = 0)
     {
         if (!Configuration.PokeDecideEnabled || !Configuration.PokeEnabled) { interactor.Poke("戳回功能已禁用"); return; }
-        if (ShouldDelegate()) { interactor.Poke(DelegateHint("戳一戳", "PokeGroupMember")); return; }
+        if (ShouldDelegate()) { interactor.Poke(PokeDelegateHint); return; }
 
         if (decide != "yes")
         {
-            _lastPokeRequest = null;
+            ClearPendingPoke(target);
             // 成功静默
             return;
         }
 
-        if (_lastPokeRequest == null)
-        {
-            interactor.Poke("没有待回应的戳一戳（可能已过期或已处理）");
-            return;
-        }
+        PokeRequest? req = TakePendingPoke(target, out string? takeErr);
+        if (req == null) { interactor.Poke(takeErr!); return; }
 
-        var req = _lastPokeRequest;
-        if ((DateTime.Now - req.Time) > TimeSpan.FromMinutes(10))
+        // 防御兜底：待回应请求永不来自自戳（sender_id 判定已挡住），此处防任何路径造成自我回戳回环
+        if (IsSelfQQ(req.UserId))
         {
-            _lastPokeRequest = null;
-            interactor.Poke("戳一戳请求已过期，不回戳");
+            interactor.Poke("这条戳是你自己发起的（自戳），不需要回戳");
             return;
         }
 
         OneBotClient? client = GetClient();
-        MarkOutgoingPoke(req.UserId);
         string? err;
         if (req.IsGroup)
             err = await CallActionSafeAsync("group_poke", new { group_id = req.GroupId, user_id = req.UserId }, "戳一戳", client);
         else
             err = await CallActionSafeAsync("friend_poke", new { user_id = req.UserId }, "私聊戳一戳", client);
-
-        _lastPokeRequest = null;
-        if (err != null) interactor.Poke(err);
+        if (err != null) { interactor.Poke(err); return; }
+        MarkOutgoingPoke(req.UserId);
+        if (!req.IsGroup) MarkPokeEchoForStrip(req.UserId, req.UserId);
     }
 
     // ==================== 引用回复 ====================
@@ -3091,13 +3244,26 @@ public class QQEnhanceModule(
                 if (oneBotEvent is OneBotPokeEvent pokeEvent)
                     targetId = pokeEvent.TargetId;
 
-                logger.LogDebug("poke通知原文：user_id={User} target_id={Target} self_id={Self} group_id={Group}",
-                    noticeEvent.UserId, targetId, noticeEvent.SelfId, noticeEvent.GroupId);
+                // NapCat 私聊戳的 user_id 恒为“会话对端”（源码 api/msg.ts 传 msg.peerUid），与谁戳谁无关；
+                // 方向信息只在扩展字段 sender_id 里（框架事件模型未映射，从 RawJson 读）
+                long senderId = TryReadSenderId(noticeEvent.RawJson);
 
-                // 第一层：自己发起的戳一戳（含回戳动作产生的回执通知）一律无视，防无限回圈
-                if (noticeEvent.UserId == noticeEvent.SelfId)
+                logger.LogDebug("poke通知原文：user_id={User} sender_id={Sender} target_id={Target} self_id={Self} group_id={Group}",
+                    noticeEvent.UserId, senderId, targetId, noticeEvent.SelfId, noticeEvent.GroupId);
+
+                // 第一层：我方发起的戳（主动戳 / 回戳 / 自戳）——含其回执，一律不进“被戳”流程，防无限回圈。
+                // 优先用 sender_id（唯一可靠的方向字段）；协议端未提供时回落旧规则（user_id==self，覆盖群聊）
+                bool fromSelf = senderId != 0
+                    ? senderId == noticeEvent.SelfId
+                    : noticeEvent.UserId == noticeEvent.SelfId;
+                if (fromSelf)
                 {
-                    logger.LogDebug("忽略自己发起的poke通知（sender==self）");
+                    // 官方 QChat 会把这条回执渲染成一条会话消息（私聊还不带发起者，显示成“对端 戳了戳 对端”），
+                    // 这里登记待剔除条目，由 ChatSend 钩子在消息进入上下文前精确剔除——
+                    // 否则 AI 会读到一条方向错误的消息并被错误触发
+                    MarkPokeEchoForStrip(noticeEvent.UserId, targetId);
+                    logger.LogDebug("我方发起的poke（含自戳/回戳回执）：sender={Sender} peer={Peer} target={Target}，已登记剔除，不触发被戳流程",
+                        senderId, noticeEvent.UserId, targetId);
                     return;
                 }
 
@@ -3119,11 +3285,13 @@ public class QQEnhanceModule(
                     lock (_pokeLock)
                     {
                         _recentOutgoingPokes.RemoveAll(p => (DateTime.Now - p.Time).TotalMinutes > 2);
-                        if (_recentOutgoingPokes.Any(p => p.UserId == noticeEvent.UserId &&
+                        // 双键匹配：群聊回执 user_id=自己、私聊回执 user_id=对端，但两者的 target 都是我戳的人；
+                        // 协议端不提供 sender_id 时，这层就是唯一的方向兜底
+                        if (_recentOutgoingPokes.Any(p => (p.UserId == noticeEvent.UserId || p.UserId == targetId) &&
                                                          (DateTime.Now - p.Time).TotalSeconds <= echoSec))
                         {
-                            logger.LogDebug("忽略疑似回戳回执回声：user_id={User}（{Sec}秒内我方刚戳过TA）",
-                                noticeEvent.UserId, echoSec);
+                            logger.LogDebug("忽略疑似回戳回执回声：user_id={User} target={Target}（{Sec}秒内我方刚戳过）",
+                                noticeEvent.UserId, targetId, echoSec);
                             return;
                         }
                     }
@@ -3154,7 +3322,11 @@ public class QQEnhanceModule(
                 }
 
                 bool isGroup = noticeEvent.GroupId != 0;
-                _lastPokeRequest = new PokeRequest(noticeEvent.UserId, noticeEvent.GroupId, isGroup, DateTime.Now);
+                // 私聊的会话对象就是对端（user_id），群聊是群号——按会话存档，避免多会话互相覆盖导致回戳错人
+                long scopeId = isGroup ? noticeEvent.GroupId : noticeEvent.UserId;
+                lock (_pokeLock)
+                    _pendingPokes[PokeSessionKey(isGroup, scopeId)] =
+                        new PokeRequest(noticeEvent.UserId, noticeEvent.GroupId, isGroup, DateTime.Now);
 
                 // 冷却期内不重复注入，避免连续戳一戳刷屏上下文
                 if (DateTime.Now - _lastPokePromptTime < PokeCooldown) return;
@@ -3165,7 +3337,7 @@ public class QQEnhanceModule(
                     ? $"用户{noticeEvent.UserId}"
                     : $"用户{noticeEvent.UserId}({userName})";
                 string where = isGroup ? $"在群 {noticeEvent.GroupId} 戳了戳你" : "私聊戳了戳你";
-                interactor.Poke($"[System {userText} {where}。你可以输出 <PokeBack decide=\"yes\"/> 回戳，或 <PokeBack decide=\"no\"/> 忽略]");
+                interactor.Poke($"[System {userText} {where}。你可以输出 <PokeBack decide=\"yes\"/> 回戳（多个会话同时被戳时加 target={noticeEvent.UserId} 指定），或 <PokeBack decide=\"no\"/> 忽略]");
             }
         }
         catch (Exception e)
