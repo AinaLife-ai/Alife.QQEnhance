@@ -749,61 +749,163 @@ public class QQEnhanceModule(
     /// 直接 return（Count==0），于是不再因为自己的动作多触发一轮对话。
     /// 只在能精确匹配（整行等于“戳了戳 {被戳者}”）时删一条；任何异常或结构不符都静默放弃——
     /// 放弃时仍有 ChatSend 内容剔除兜底，不会出现方向错误的脏内容</summary>
-    private bool TryStripPokeEchoFromPrivateBuffer(long peerId, long targetId)
+    private List<System.Collections.IDictionary>? _stateContainers;
+    private DateTime _containerWarnAt = DateTime.MinValue;
+    private DateTime _dropFailWarnAt = DateTime.MinValue;
+    private readonly List<(long Peer, long Target, DateTime Until)> _pendingEchoDrops = new();
+
+    /// <summary>按“结构”而非字段名定位官方会话状态容器（值类型带 MessageBuffer 属性的 Dictionary&lt;long,_&gt;）。
+    /// 这样官方改字段名也不会失效；一个都找不到时留一次告警，便于从日志一眼看出是版本不匹配</summary>
+    private List<System.Collections.IDictionary> GetStateContainers()
+    {
+        if (_stateContainers != null) return _stateContainers;
+        List<System.Collections.IDictionary> found = new();
+        try
+        {
+            foreach (FieldInfo f in typeof(QChatService).GetFields(
+                BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public))
+            {
+                if (!f.FieldType.IsGenericType) continue;
+                Type[] args = f.FieldType.GetGenericArguments();
+                if (args.Length != 2 || args[0] != typeof(long)) continue;
+                if (args[1].GetProperty("MessageBuffer") == null) continue;
+                if (f.GetValue(qChatService) is System.Collections.IDictionary dict) found.Add(dict);
+            }
+        }
+        catch (Exception e)
+        {
+            logger.LogDebug(e, "按结构定位官方会话状态容器失败");
+        }
+
+        if (found.Count == 0 && DateTime.Now - _containerWarnAt > TimeSpan.FromMinutes(5))
+        {
+            _containerWarnAt = DateTime.Now;
+            logger.LogWarning("未能定位官方会话状态容器（QChat 版本可能不同）——戳回执摘除不可用，" +
+                "本次起会多一轮对话（内容仍由 ChatSend 清理，并已提示 AI 无需回应）");
+        }
+        _stateContainers = found;
+        return found;
+    }
+
+    /// <summary>只在整行完全相等时删一条（绝不碰其他消息）</summary>
+    private static bool TryRemoveExactLine(object source, string expect)
+    {
+        if (source.GetType().GetProperty("MessageBuffer")?.GetValue(source) is not System.Collections.IList buffer)
+            return false;
+        for (int i = buffer.Count - 1; i >= 0; i--)
+        {
+            if (buffer[i] is string line && string.Equals(line.TrimEnd('\r'), expect, StringComparison.Ordinal))
+            {
+                buffer.RemoveAt(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>摘除“我方戳动作回执”。先在“对端键”对应的会话里找；找不到就全容器按内容定位——
+    /// 万一协议端的 user_id 语义与预期不同（键对不上）也能命中。
+    /// 群聊不受影响：群聊缓冲里的行是“[QQ]:戳了戳 X”，与本函数的整行精确匹配永不相等</summary>
+    private bool TryStripPokeEchoFromBuffers(long peerId, long targetId)
     {
         if (!Configuration.PokeEchoDropTurnEnabled || targetId == 0) return false;
         try
         {
-            FieldInfo? field = typeof(QChatService).GetField("privateStates",
-                BindingFlags.NonPublic | BindingFlags.Instance);
-            if (field?.GetValue(qChatService) is not System.Collections.IDictionary states) return false;
-            object? source = states[peerId];
-            if (source == null) return false;
-            PropertyInfo? bufferProp = source.GetType().GetProperty("MessageBuffer");
-            if (bufferProp?.GetValue(source) is not System.Collections.IList buffer) return false;
-
+            List<System.Collections.IDictionary> containers = GetStateContainers();
+            if (containers.Count == 0) return false;
             string expect = "戳了戳 " + targetId;
-            for (int i = buffer.Count - 1; i >= 0; i--)
+
+            foreach (System.Collections.IDictionary dict in containers)
             {
-                if (buffer[i] is string line && string.Equals(line.TrimEnd('\r'), expect, StringComparison.Ordinal))
+                if (dict[peerId] is object src && TryRemoveExactLine(src, expect))
                 {
-                    buffer.RemoveAt(i);
-                    logger.LogDebug("已从官方私聊缓冲摘除我方戳回执（不再多触发一轮对话）：peer={Peer} target={Target}",
+                    logger.LogInformation("已摘除我方戳回执：本次不再因自己的动作多触发一轮（peer={Peer} target={Target}）",
                         peerId, targetId);
                     return true;
+                }
+            }
+            foreach (System.Collections.IDictionary dict in containers)
+            {
+                foreach (object? src in dict.Values)
+                {
+                    if (src != null && TryRemoveExactLine(src, expect))
+                    {
+                        logger.LogInformation("已摘除我方戳回执（按内容定位，peer={Peer} target={Target}）", peerId, targetId);
+                        return true;
+                    }
                 }
             }
         }
         catch (Exception e)
         {
-            logger.LogDebug(e, "摘除私聊缓冲里的戳回执失败（忽略；内容仍由 ChatSend 兜底剔除）");
+            logger.LogDebug(e, "摘除戳回执失败（忽略；内容仍由 ChatSend 兜底剔除）");
         }
         return false;
     }
 
-    /// <summary>调度“摘除我方戳回执”（私聊）。先立即试一次（订阅顺序正确时同一轮派发内就能命中），
-    /// 未命中再按小间隔重试，覆盖订阅顺序不利/官方 flush 抢先的情形。
-    /// 全部未命中也只是退化成“多一轮无脏内容的对话”，不会更差</summary>
+    private void ClearPendingEchoDrop(long peerId, long targetId)
+    {
+        lock (_pokeLock)
+            _pendingEchoDrops.RemoveAll(d => d.Peer == peerId && d.Target == targetId);
+    }
+
+    /// <summary>调度“摘除我方戳回执”。先立即试一次（订阅顺序正确时同一轮派发内即可命中）；
+    /// 官方 flush 由 0.3 秒的 tick 驱动，所以未命中先按 5ms 密集轮询抢跑，再退避重试；
+    /// 同时登记到 _pendingEchoDrops，让 OnUpdate 每个 tick 再兜一次。
+    /// 全部未命中也只是退化成“多一轮无脏内容的对话”，且该轮会被明确提示无需回应</summary>
     private void SchedulePokeEchoTurnDrop(long peerId, long targetId)
     {
         if (!Configuration.PokeEchoDropTurnEnabled || targetId == 0) return;
-        if (TryStripPokeEchoFromPrivateBuffer(peerId, targetId)) return;
+        if (TryStripPokeEchoFromBuffers(peerId, targetId)) return;
+
+        lock (_pokeLock)
+        {
+            _pendingEchoDrops.RemoveAll(d => DateTime.Now > d.Until);
+            _pendingEchoDrops.Add((peerId, targetId, DateTime.Now.AddSeconds(1.5)));
+        }
+
         _ = Task.Run(async () =>
         {
             try
             {
-                foreach (int delay in new[] { 20, 60, 150 })
+                for (int i = 0; i < 12; i++)
+                {
+                    await Task.Delay(5);
+                    if (TryStripPokeEchoFromBuffers(peerId, targetId)) { ClearPendingEchoDrop(peerId, targetId); return; }
+                }
+                foreach (int delay in new[] { 40, 100, 200, 350 })
                 {
                     await Task.Delay(delay);
-                    if (TryStripPokeEchoFromPrivateBuffer(peerId, targetId)) return;
+                    if (TryStripPokeEchoFromBuffers(peerId, targetId)) { ClearPendingEchoDrop(peerId, targetId); return; }
                 }
-                logger.LogDebug("私聊戳回执未能及时摘除（官方已抢先 flush）——本次会多一轮对话，内容已由 ChatSend 清理");
+                if (DateTime.Now - _dropFailWarnAt > TimeSpan.FromSeconds(30))
+                {
+                    _dropFailWarnAt = DateTime.Now;
+                    logger.LogWarning("戳回执未能摘除（官方已抢先 flush）——本次会多一轮对话；内容已由 ChatSend 清理，并已提示 AI 无需回应");
+                }
             }
             catch (Exception e)
             {
-                logger.LogDebug(e, "延时摘除私聊戳回执失败（忽略）");
+                logger.LogDebug(e, "延时摘除戳回执失败（忽略）");
             }
         });
+    }
+
+    /// <summary>每个 tick 再兜一次（万一本模块的更新恰好早于官方私聊 flush）</summary>
+    private void SweepPokeEchoDrops()
+    {
+        List<(long Peer, long Target, DateTime Until)> todo;
+        lock (_pokeLock)
+        {
+            _pendingEchoDrops.RemoveAll(d => DateTime.Now > d.Until);
+            if (_pendingEchoDrops.Count == 0) return;
+            todo = _pendingEchoDrops.ToList();
+        }
+        foreach ((long peer, long target, DateTime _) in todo)
+        {
+            if (TryStripPokeEchoFromBuffers(peer, target))
+                ClearPendingEchoDrop(peer, target);
+        }
     }
 
     /// <summary>取出待回应的戳请求（默认最近一次；target&gt;0 时按对象精确指定）。过期即丢弃</summary>
@@ -889,7 +991,15 @@ public class QQEnhanceModule(
         }
         if (removed == 0) return message;
         logger.LogDebug("已剔除 {Count} 行我方戳一戳回执（官方渲染的会话消息），避免 AI 误判为被戳", removed);
-        return string.Join("\n", lines);
+        string result = string.Join("\n", lines);
+
+        // 漏网兜底：若剔完这条消息已没有任何可回应内容（说明摘缓冲没赶上、官方仍开了这一轮），
+        // 就明确提示“无需回应”，免得 AI 把空上下文猜成“主人手滑发了个空消息”。
+        // 注意：这一条**不跟**「戳回执不触发对话」开关绑定——它属于内容净化，关掉摘除的用户同样需要
+        if (!HasRealContent(result))
+            result += "\n[System 以上只是你自己戳一戳动作的记录，没有新的可回应内容，请保持沉默不要回复]";
+
+        return result;
     }
 
     protected override Task OnAwake()
@@ -1030,6 +1140,13 @@ public class QQEnhanceModule(
         {
             logger.LogWarning(e, "调整事件订阅顺序失败（不影响其他功能；戳回执改为延时摘除）");
         }
+        return Task.CompletedTask;
+    }
+
+    /// <summary>每个 tick 兜一次“摘除戳回执”（见 SweepPokeEchoDrops）</summary>
+    protected override Task OnUpdate()
+    {
+        SweepPokeEchoDrops();
         return Task.CompletedTask;
     }
 
@@ -3350,6 +3467,8 @@ public class QQEnhanceModule(
                     // 群聊不处理——群聊渲染带发起者（“[自己QQ]:戳了戳 X”），语义本来就对
                     if (noticeEvent.GroupId == 0)
                         SchedulePokeEchoTurnDrop(noticeEvent.UserId, targetId);
+                    else if (Configuration.PokeEchoDropTurnEnabled)
+                        MarkOutgoingPoke(targetId); // 群聊不摘缓冲，仅保留回声抑制记录
                     logger.LogDebug("我方发起的poke（含自戳/回戳回执）：sender={Sender} peer={Peer} target={Target}，已登记剔除，不触发被戳流程",
                         senderId, noticeEvent.UserId, targetId);
                     return;
@@ -3498,12 +3617,38 @@ public class QQEnhanceModule(
         }
     }
 
+    /// <summary>一整行是否只由来源标签 [..] / QChat 附加提示 (..) 组成（即没有实际内容）</summary>
+    private static bool IsNonContentLine(string line)
+    {
+        string left = Regex.Replace(line, @"\[[^\]]*\]", "").Trim();
+        if (left.Length == 0) return true;
+        // 整行就是一个括号包裹的附加提示，例如“(回复请保持1-20字)”
+        if (left.Length >= 2 && left[0] == '(' && left[left.Length - 1] == ')') return true;
+        return false;
+    }
+
+    /// <summary>消息里是否存在“可回应的实际内容”。
+    /// 注意群聊行是“[群聊消息(群号,群名)] [QQ(昵称)]: 内容”这种**同一行**格式，
+    /// 所以必须剥掉标签后看剩下什么，不能只看行首字符</summary>
+    private static bool HasRealContent(string message)
+    {
+        foreach (string raw in message.Split('\n'))
+        {
+            string line = raw.Trim();
+            if (line.Length == 0) continue;
+            if (!IsNonContentLine(line)) return true;
+        }
+        return false;
+    }
+
     // ==================== 互动提示（官方消息过滤同款 ChatSend 钩子） ====================
 
     /// <summary>收到QQ消息时按概率在消息末尾附加互动提示（动态填入发言人参数，AI照抄即可调用，无需查ID）</summary>
     private string OnChatSendHint(string message)
     {
         if (!Configuration.InteractionHintEnabled) return message;
+        // 没有可回应内容（例如只剩来源标签的戳回执）时不附加互动提示——否则等于催 AI 再去戳一次
+        if (!HasRealContent(message)) return message;
         if (string.IsNullOrWhiteSpace(Configuration.InteractionHintText)) return message;
         // 只附加在 QQ 来源的消息上（群聊/私聊标签），不影响其他模块的消息
         bool isGroupMsg = message.Contains("[群聊消息(");
