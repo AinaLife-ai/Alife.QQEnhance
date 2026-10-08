@@ -88,6 +88,21 @@ public class QQEnhanceConfig
     [Description("从 https://apii.xianyuw.cn 注册后复制的 API Key。留空则「第三方ARK签名通道」不会生效（自动用默认通道）")]
     public string MusicArkToken { get; set; } = "";
 
+    [DisplayName("功能文档常驻（推荐）")]
+    [Description("开启：本插件的功能文档常驻在系统提示词里，AI 始终可见 —— 不再出现「调用入口才加载文档」「文档滑出上下文后反复重新注入」的往返（QQ 属高频场景，反复重注入更费 token 也更慢）。" +
+        "关闭：改回渐进式加载（AI 每次调用函数都要先输出 <QQEnhanceModule/> 读文档，文档滑出后还会再注入一次）。切换后需重载插件生效")]
+    public bool DocumentAlwaysResident { get; set; } = true;
+
+    [DisplayName("B站卡片走签名（推荐）")]
+    [Description("开启：B站卡片走第三方签名通路后发送——QQ 只渲染已签名的卡，这样卡片才显示得出来；" +
+        "代价是卡片标签会显示成“QQ音乐”（签名服务固定行为，与 Suran.ShareArk 一致）。" +
+        "关闭：改用自建 news 卡（appid/标签正确，但无签名，实测群里可能显示不出来）")]
+    public bool BiliCardUseSign { get; set; } = true;
+
+    [DisplayName("通用分享卡")]
+    [Description("允许 AI 用 SendShareCard 把任意网页链接做成QQ分享卡发送（标题/描述/预览图可留空自动抓取）。走与音乐卡相同的签名服务")]
+    public bool ShareCardEnabled { get; set; } = true;
+
     [DisplayName("B站卡片")]
     [Description("启用发送B站视频卡片（platform=bilibili 传 BV 号）。使用 QQ 通用图文卡（news）自行构造，不依赖任何签名服务与协议端白名单；如需关闭可在此禁用")]
     public bool BiliCardEnabled { get; set; } = true;
@@ -1040,7 +1055,10 @@ public class QQEnhanceModule(
             Description = "QQ增强：贴表情、资料卡点赞、撤回、禁言、戳一戳、引用回复、合并转发、点歌发音乐卡片、消息ID查询。可随手用 SetEmojiRecent/ReplyRecent/PokeGroupMember/SendQQLikes 轻量互动",
             Explanation = explanation
         };
-        functionCaller.RegisterHandler(xmlHandler, DocumentMode.Implicit, DestroyCancellationToken);
+        // 文档注入模式：常驻（默认）＝始终可见、零重注入；渐进式＝调用入口才加载（旧行为，可配置回退）
+        functionCaller.RegisterHandler(xmlHandler,
+            Configuration.DocumentAlwaysResident ? DocumentMode.Explicit : DocumentMode.Implicit,
+            DestroyCancellationToken);
 
         // 常驻社交风格提示（可在配置中自定义/清空）
         if (!string.IsNullOrWhiteSpace(Configuration.SocialPrompt))
@@ -1107,7 +1125,15 @@ public class QQEnhanceModule(
                         CorrectionMessage = orig.CorrectionMessage
                     };
                     messageFilterService.AddMessageReplyRule(_extendedQChatRule, DestroyCancellationToken);
-                    logger.LogInformation("QQ增强：已扩展QChat回复格式规则，使用QQ增强函数回复不再触发格式纠正");
+                    // 自检：规则确实进去了才宣称成功（官方改了内部实现时能一眼看出来，而不是静默失效）
+                    bool applied = messageFilterService.MessageReplyRules.Any(r =>
+                        string.Equals(r.Name, orig.Name, StringComparison.OrdinalIgnoreCase) &&
+                        r.OutputMatching("QQEnhance-SendMusicCard-探测"));
+                    if (applied)
+                        logger.LogInformation("QQ增强：已扩展QChat回复格式规则，使用QQ增强函数回复不再触发格式纠正（自检通过）");
+                    else
+                        logger.LogWarning("QQ增强：回复格式规则替换未生效（官方 MessageFilter 实现可能已变化）——" +
+                            "使用本插件函数回复时可能仍被纠正，不影响其它功能");
                 }
                 else
                 {
@@ -1439,15 +1465,15 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("给QQ消息贴表情回应（一步到位，无需先查ID，仅群聊消息可贴，私聊平台不支持）。看到有趣/赞同/暖心/好笑的消息随手贴一个（常用：201=点赞 264=捂脸 182=笑哭 271=吃瓜 270=emm 179=doge 269=暗中观察 273=我酸了 272=呵呵哒 222=抱抱 227=拍手 311=打call 116=示爱 122=爱你 214=啵啵 219=蹭一蹭 111=可怜 106=委屈 173=泪奔 262=脑阔疼 268=问号脸 265=辣眼睛，更多可传 emojiId=0 查看完整对照表再选），这是真人最轻量的互动方式，不需要说话就可以直接贴。两种用法：1) 默认贴 target 的最近一条（index 可指定倒数第N条）；2) 已知真实消息ID时直接传 messageId（必须来自 QGetMessages 或撤回列表，严禁编造）")]
+    [Description("给QQ消息贴表情回应（一步到位，无需先查ID；仅群聊，私聊平台不支持）。看到有趣/赞同/暖心/好笑的消息随手贴一个，这是真人最轻量的互动方式。常用表情：201=点赞 264=捂脸 182=笑哭 271=吃瓜 179=doge 268=问号脸（完整对照表传 emojiId=0 查看，别总用同一个）。两种用法：1) 默认贴 target 的最近一条（index 指定倒数第N条）；2) 已知真实消息ID时直接传 messageId（必须来自 QGetMessages 或撤回列表，严禁编造）")]
     public async Task SetEmojiRecent(
-        [Description("目标用户QQ号或昵称，\"我\"表示自己（messageId 模式下可省略）")] string target = "",
-        [Description("表情ID，默认201=点赞；传 0 = 不贴表情，只显示完整表情ID对照表（看完再选）")] int emojiId = 201,
+        [Description("目标用户QQ号或昵称，\"我\"表示自己")] string target = "",
+        [Description("表情ID，默认201=点赞；传 0 = 只显示完整表情ID对照表")] int emojiId = 201,
         [Description("贴倒数第几条，默认1=最近一条")] int index = 1,
-        [Description("真实消息ID（可选，传入则直接对该消息贴，忽略 target/index/list）")] long messageId = 0,
-        [Description("目标群号（可省略，省略时自动推断最近会话）")] long targetId = 0,
+        [Description("真实消息ID（传入则直接对该消息贴，忽略 target/index/list）")] long messageId = 0,
+        [Description("目标群号（可省略，自动推断最近会话）")] long targetId = 0,
         [Description("消息类型：group或private，可省略")] string messageType = "",
-        [Description("true=只列出 target 最近10条候选（不贴），看完用 index=序号 或 messageId 贴；不确定贴哪条时才用，默认false直接贴最近一条")] bool list = false)
+        [Description("true=只列出 target 最近10条候选（不贴），再用 index/messageId 贴")] bool list = false)
     {
         if (!Configuration.EmojiReactEnabled) { interactor.Poke("贴表情功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("贴表情", "SendEmojiLike")); return; }
@@ -1505,7 +1531,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("给某人资料卡点赞。对方帮了忙、说了让你开心的话、想表达'我注意到你了'时用，像真人互赞一样自然。好友与陌生人均可；每人每天上限50个（平台限制），达到上限会明确提示，明天可再来")]
+    [Description("给某人资料卡点赞（好友/陌生人）。对方帮了忙、说了让你开心的话时自然回赞。每人每天上限50个（平台限制），到时明确提示，明天可再来")]
     public async Task SendQQLikes(
         [Description("QQ号")] long qq,
         [Description("点赞次数，默认50次（平台每日上限）")] int times = 50)
@@ -1541,14 +1567,14 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("撤回消息（一步到位，无需先查ID）。说错话、发错会话、内容有误时立刻用。三种用法：1) 默认撤 target 的倒数第 index 条；2) 已知真实ID时传 messageId 直接撤（必须来自 QGetMessages 或 list 列表，严禁编造）；3) list=true 先出候选列表（序号+消息ID+折叠内容）再用 index 或 messageId 撤。私聊只能撤自己的；群聊默认撤自己的，是管理员时可撤他人")]
+    [Description("撤回消息（一步到位，无需先查ID）。说错话、发错会话、内容有误时立刻用。三种用法：1) 默认撤 target 的倒数第 index 条；2) 已知真实ID时传 messageId 直接撤（必须来自 QGetMessages 或 list 列表，严禁编造）；3) list=true 先出候选列表再用 index/messageId 撤。私聊只能撤自己的；群聊默认撤自己的，是管理员时可撤他人")]
     public async Task DeleteMsgRecent(
-        [Description("目标群号或对方QQ（可省略，省略时自动找目标最近发言所在会话）")] long targetId = 0,
+        [Description("目标群号或对方QQ（可省略，自动找目标最近发言所在会话）")] long targetId = 0,
         [Description("撤回谁的消息：默认\"我\"，管理员撤群员时填对方QQ号")] string target = "我",
         [Description("消息类型：group或private，可省略，省略时自动判定")] string messageType = "",
-        [Description("撤回倒数第几条：默认1=最近一条，2=倒数第二条，以此类推")] int index = 1,
-        [Description("真实消息ID（可选，传入则直接撤该条，忽略 target/index/list）")] long messageId = 0,
-        [Description("true=只列出 target 最近10条候选（不撤回），看完用 index=序号 或 messageId 撤；序号在快照有效期内不受新消息影响")] bool list = false)
+        [Description("撤回倒数第几条：默认1=最近一条")] int index = 1,
+        [Description("真实消息ID（传入则直接撤该条，忽略 target/index/list）")] long messageId = 0,
+        [Description("true=只列出 target 最近10条候选（不撤回），再用 index/messageId 撤")] bool list = false)
     {
         if (!Configuration.DeleteMsgEnabled) { interactor.Poke("撤回功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("撤回", "DeleteMessage")); return; }
@@ -1621,11 +1647,11 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("禁言QQ群成员。群号可从群消息标签[群聊消息(群号,群名)]中获取")]
+    [Description("禁言QQ群成员（duration 秒，默认600，传 0 解除）。群号取自群消息标签 [群聊消息(群号,群名)]")]
     public async Task GroupBan(
         [Description("群号")] long groupId,
         [Description("QQ号")] long userId,
-        [Description("禁言时长(秒)，默认600秒，0为解除禁言")] int duration = 600)
+        [Description("禁言时长(秒)，默认600，0为解除禁言")] int duration = 600)
     {
         if (!Configuration.GroupBanEnabled) { interactor.Poke("禁言功能已禁用"); return; }
         OneBotClient? client = GetClient();
@@ -1634,7 +1660,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("戳一戳群成员。想引起对方注意、打招呼、催回复、表达'我来啦/我赞同'时随手戳，比打字更轻快。userId 可传自己（自戳）")]
+    [Description("戳一戳群成员。想引起注意、打招呼、催回复、表达'我来啦/我赞同'时随手戳，比打字轻快。userId 可传自己（自戳）")]
     public async Task PokeGroupMember(
         [Description("群号")] long groupId,
         [Description("QQ号")] long userId)
@@ -1652,7 +1678,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("私聊戳一戳指定用户。私聊里打招呼、提醒看消息时随手用。userId 传对方QQ；传自己的QQ 即为自戳")]
+    [Description("私聊戳一戳指定用户。打招呼、提醒看消息时随手用。userId 传对方QQ；传自己的QQ 即为自戳")]
     public async Task PokePrivateMember(
         [Description("QQ号")] long userId)
     {
@@ -1669,7 +1695,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("回应最近一次戳你的人：回戳或忽略。当系统提示你被戳了时调用。decide=\"yes\"回戳；decide=\"no\"忽略。只用于回应戳一戳，主动戳人请用 PokeGroupMember/PokePrivateMember")]
+    [Description("回应最近一次戳你的人：decide=\"yes\" 回戳 / \"no\" 忽略（被戳时系统会提示）。多个会话同时被戳时用 target 指定对象。主动戳人请用 PokeGroupMember/PokePrivateMember")]
     public async Task PokeBack(
         [Description("yes=回戳，no=忽略")] string decide = "yes",
         [Description("可选：指定回戳对象QQ（多个会话同时被戳时用它精确指定；缺省取最近一次）")] long target = 0)
@@ -1738,15 +1764,15 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("引用回复（一步到位，无需先查ID）。群聊里回应特定某人时优先用它（比@更清楚）；私聊接梗/辩论时引用对方原话再回更自然。两种用法：1) 默认引用 target 的最近一条（index 可指定倒数第N条）；2) 已知真实ID时传 replyToId 直接引用该条（必须来自 QGetMessages 或撤回列表，严禁编造）")]
+    [Description("引用回复（一步到位，无需先查ID）。群聊里回应特定某人时优先用它（比@更清楚）；私聊引用对方原话再回更自然。两种用法：1) 默认引用 target 的最近一条（index 指定倒数第N条）；2) 已知真实ID时传 replyToId 直接引用（必须来自 QGetMessages 或 list 列表，严禁编造）；list=true 可先列候选")]
     public async Task ReplyRecent(
         [Description("回复内容")] string message,
-        [Description("目标用户QQ号或昵称，\"我\"表示自己（replyToId 模式下可省略）")] string target = "",
+        [Description("目标用户QQ号或昵称，\"我\"表示自己")] string target = "",
         [Description("引用倒数第几条，默认1=最近一条")] int index = 1,
-        [Description("被回复消息的真实ID（可选，传入则直接引用该条，忽略 target/index）")] long replyToId = 0,
-        [Description("目标群号或对方QQ（可省略，省略时自动推断该用户最近发言所在会话）")] long targetId = 0,
+        [Description("被回复消息的真实ID（传入则直接引用该条，忽略 target/index）")] long replyToId = 0,
+        [Description("目标群号或对方QQ（可省略，自动推断该用户最近发言所在会话）")] long targetId = 0,
         [Description("消息类型：group或private，可省略")] string messageType = "",
-        [Description("true=只列出 target 最近10条候选（不引用），看完用 index=序号 或 replyToId 引用；不确定引哪条时才用，默认false直接引用最近一条")] bool list = false)
+        [Description("true=只列出 target 最近10条候选（不引用），再用 index/replyToId 引用")] bool list = false)
     {
         if (!Configuration.ReplyEnabled) { interactor.Poke("引用回复功能已禁用"); return; }
         if (ShouldDelegate()) { interactor.Poke(DelegateHint("引用回复", "SendReplyMessage")); return; }
@@ -1837,7 +1863,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("转发某群/私聊最近N条消息为合并转发（免ID，一步到位）。文本/图片/语音/视频/表情原样转发（图片按原始URL重发为真实图片）；文件/嵌套转发/引用/卡片/音乐走真实消息ID节点，结构完整保留；含bot自己发的消息，发送者显示真实QQ昵称；缓存不足时自动回拉历史消息补齐")]
+    [Description("把某群/私聊最近N条消息合并转发（免ID，一步到位）。文本/图片/语音/视频/表情原样转发（图片按原始URL重发为真实图片）；文件/嵌套转发/引用/卡片/音乐按真实消息ID节点保留结构；含bot自己的消息，发送者显示真实QQ昵称；缓存不足自动回拉补齐")]
     public async Task ForwardRecent(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("转发条数，1-50，默认5")] int count = 5,
@@ -1893,10 +1919,10 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("转发一条已有的合并转发消息到群聊/私聊。forwardId 为该合并转发消息的消息ID（来自 QGetMessages 返回的[消息ID:xxx]，可为负数）")]
+    [Description("转发一条已有的合并转发消息到群聊/私聊。forwardId 取自 QGetMessages 返回的 [消息ID:xxx]（可为负数）")]
     public async Task SendForwardById(
         [Description("目标群号或对方QQ")] long targetId,
-        [Description("合并转发消息的消息ID（来自QGetMessages）")] long forwardId,
+        [Description("合并转发消息的消息ID（来自QGetMessages，可为负）")] long forwardId,
         [Description("消息类型：group或private，可省略，省略时自动判定")] string messageType = "")
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
@@ -1907,7 +1933,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("构造并发送新的合并转发消息。nodesJson为JSON数组，每个节点两种格式：{\"name\":\"昵称\",\"uin\":QQ号,\"content\":\"内容\"}（自定义内容）或 {\"id\":真实消息ID}（引用真实消息，id必须来自QGetMessages，数字或数字字符串均可）。⚠必须传完整合法的JSON数组，最外层用[]包裹，不要漏收尾括号")]
+    [Description("构造并发送新的合并转发消息。nodesJson 为 JSON 数组，节点两种格式：{\"name\":\"昵称\",\"uin\":QQ号,\"content\":\"内容\"} 或 {\"id\":真实消息ID}（id 必须来自 QGetMessages）。⚠必须传完整合法的 JSON 数组：最外层 [] 包裹，不要漏收尾括号")]
     public async Task SendForwardNew(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("节点JSON数组（必须是完整合法的JSON，[]闭合）")] string nodesJson,
@@ -2044,14 +2070,126 @@ public class QQEnhanceModule(
     private static string CqEscape(string s) =>
         s.Replace("&", "&amp;").Replace("[", "&#91;").Replace("]", "&#93;").Replace(",", "&#44;");
 
+
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("发送音乐到QQ聊天（点歌）。platform=search musicId=歌名关键词（如 晴天 周杰伦）即可；platform=163/qq/kugou/migu/kuwo 时 musicId 为该平台原生ID并原样透传。样式由配置「音乐卡片样式」决定，custom/record 只对网易云 search/163 生效（其它平台一律原生卡片）；被协议端拒绝时会尝试公共签名兜底，仍不行则按 163→custom→record 自动降级一次；超时不会重发（卡片可能已发出，请用 QGetMessages 确认，不要重复发送）")]
+    [Description("把任意网页链接做成QQ分享卡发送（标题/描述/预览图可留空，会自动抓取网页 og 信息）。用于分享链接、文章、视频页等；卡片点击即跳转该链接")]
+    public async Task SendShareCard(
+        [Description("跳转链接（http/https）")] string url,
+        [Description("目标群号或对方QQ")] long targetId,
+        [Description("卡片标题（可留空自动抓取）")] string? title = null,
+        [Description("卡片描述（可留空自动抓取）")] string? desc = null,
+        [Description("预览图URL（可留空自动抓取）")] string? preview = null,
+        [Description("消息类型：group或private（可省略，自动判定）")] string messageType = "")
+    {
+        if (!Configuration.ShareCardEnabled) { interactor.Poke("通用分享卡功能已禁用"); return; }
+        if (!Regex.IsMatch((url ?? "").Trim(), @"^https?://"))
+        {
+            interactor.Poke("请传以 http/https 开头的链接");
+            return;
+        }
+        OneBotClient? client = GetClient();
+        if (client == null) { interactor.Poke("分享卡发送失败：QQ客户端不可用"); return; }
+
+        try
+        {
+            string link = url.Trim();
+            if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(desc) || string.IsNullOrWhiteSpace(preview))
+            {
+                var (ot, od, oi) = await FetchLinkMetaAsync(link);
+                if (string.IsNullOrWhiteSpace(title)) title = ot;
+                if (string.IsNullOrWhiteSpace(desc)) desc = od;
+                if (string.IsNullOrWhiteSpace(preview)) preview = oi;
+            }
+            string host = Uri.TryCreate(link, UriKind.Absolute, out Uri? u) ? u.Host : link;
+            string t = string.IsNullOrWhiteSpace(title) ? host : title!;
+
+            // 复用签名通路：同一服务的 custom 形式可签任意链接卡（公共免key兜底默认可用）
+            string? cardJson = null;
+            foreach (string signUrl in new[]
+                     {
+                         Configuration.MusicSignUrl?.Trim() ?? "",
+                         Configuration.MusicSignFallbackUrl?.Trim() ?? ""
+                     })
+            {
+                if (signUrl.Length == 0) continue;
+                cardJson = await SignNcmCardAsync(signUrl, link, t, desc ?? "", preview ?? "", "", platformType: "link");
+                if (cardJson != null) break;
+            }
+            if (cardJson == null)
+            {
+                interactor.Poke("分享卡签名失败（第三方签名服务不可用），未发送");
+                return;
+            }
+
+            bool isGroup = await DetectIsGroupAsync(targetId, messageType);
+            object message = new object[] { new { type = "json", data = new { data = cardJson } } };
+            object sendParams = isGroup ? new { group_id = targetId, message } : new { user_id = targetId, message };
+            SendResult? sent = await client.CallActionAsync<SendResult>("send_msg", sendParams);
+            long sentId = ExtractSentId(sent);
+            if (sentId != 0)
+                RecordSentMessage(sentId, isGroup ? targetId : 0, isGroup ? 0 : targetId, $"[分享卡 {host}]");
+            // 成功静默：不触发新一轮确认回复
+        }
+        catch (TaskCanceledException)
+        {
+            interactor.Poke("分享卡发送超时（10秒未收到协议端响应）。卡片可能已发出，请先用 QGetMessages 确认，不要重复发送");
+        }
+        catch (Exception e)
+        {
+            interactor.Poke($"分享卡发送失败：{e.Message}");
+        }
+    }
+
+    /// <summary>抓取网页 og:title/og:description/og:image（取不到回落 &lt;title&gt;），用于分享卡自动补全</summary>
+    private async Task<(string title, string desc, string image)> FetchLinkMetaAsync(string url)
+    {
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
+            using HttpResponseMessage resp = await _http.SendAsync(req);
+            if (!resp.IsSuccessStatusCode) return ("", "", "");
+            string html = await resp.Content.ReadAsStringAsync();
+            if (html.Length > 200_000) html = html[..200_000];      // 防超大页面
+
+            static string Unescape(string v) => v.Replace("&amp;", "&").Replace("&quot;", "\"").Replace("&#39;", "'").Trim();
+            string Og(string prop)
+            {
+                Match m = Regex.Match(html,
+                    "<meta[^>]+(?:property|name)=[\"']" + prop + "[\"'][^>]*content=[\"']([^\"']*)[\"']",
+                    RegexOptions.IgnoreCase);
+                if (!m.Success)
+                    m = Regex.Match(html,
+                        "<meta[^>]+content=[\"']([^\"']*)[\"'][^>]*(?:property|name)=[\"']" + prop + "[\"']",
+                        RegexOptions.IgnoreCase);
+                return m.Success ? Unescape(m.Groups[1].Value) : "";
+            }
+            string title = Og("og:title");
+            if (title.Length == 0)
+            {
+                Match mt = Regex.Match(html, "<title[^>]*>(.*?)</title>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+                if (mt.Success) title = Unescape(mt.Groups[1].Value);
+            }
+            string desc = Og("og:description");
+            if (desc.Length == 0) desc = Og("description");
+            string image = Og("og:image");
+            if (image.StartsWith("//")) image = "https:" + image;
+            return (title, desc, image);
+        }
+        catch
+        {
+            return ("", "", "");
+        }
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("点歌/发卡到QQ。platform=search 时 musicId 传歌名关键词（推荐）；platform=163/qq/kugou/migu/kuwo 时传该平台原生ID（原样透传）；platform=bilibili 时传 BV号或视频链接（如 BV15wUXYAEci）。style 显式填写则按其发送（163=原生卡/custom=自定义卡/record=语音条，仅网易云生效），留空由配置决定；被协议端拒绝会尝试签名兜底，仍不行按 163→custom→record 降级一次；超时不重发（卡片可能已发出，先用 QGetMessages 确认）")]
     public async Task SendMusicCard(
         [Description("目标群号或对方QQ")] long targetId,
-        [Description("消息类型：private或group，可省略，省略时自动判定")] string type = "",
-        [Description("音乐平台：search=关键词搜索网易云（推荐）/163=网易云歌曲ID/qq/kugou/migu/kuwo=对应平台原生ID/bilibili=B站视频（musicId 传 BV 号，如 BV15wUXYAEci）")] string platform = "search",
-        [Description("歌曲关键词（platform=search时）或平台音乐ID（其他platform时原样透传，不做任何转换）")] string musicId = "",
-        [Description("卡片样式（可选，不填则用配置默认值）：163=原生卡片 / custom=自定义卡片 / record=语音条。**显式填写时会按你指定的样式发送**（例如：想发语音条就传 record，想做自定义卡就传 custom），不会强制走其它通道；留空则由配置决定。仅对网易云歌曲（platform=search/163）生效，其它平台一律原生卡片")] string style = "")
+        [Description("消息类型：private或group（可省略，自动判定）")] string type = "",
+        [Description("音乐平台：search=关键词搜索网易云（推荐）/163=网易云歌曲ID/qq/kugou/migu/kuwo=对应平台原生ID/bilibili=B站视频（传 BV号 或 视频链接）")] string platform = "search",
+        [Description("歌曲关键词（platform=search）或平台音乐ID/BV号（其它platform原样透传）")] string musicId = "",
+        [Description("卡片样式：163=原生卡片 / custom=自定义卡片 / record=语音条；显式填写则按其发送（仅网易云生效），留空由配置决定")] string style = "")
     {
         if (!Configuration.MusicCardEnabled) { interactor.Poke("音乐卡片功能已禁用"); return; }
         if (targetId == 0) { interactor.Poke("targetId不能为0"); return; }
@@ -2138,16 +2276,15 @@ public class QQEnhanceModule(
                 logger.LogDebug("平台 {Platform} 未取到播放直链（custom/record 将不可用，直接走原生卡片）", pf);
         }
 
-        // B站：自建通用图文卡（news）——**始终不走 ARK、也不走签名服务**
-        // 原因：第三方签名服务不认识 B站，会按"QQ音乐图文卡"兜底产出错误的 appid/tag 并代理封面
-        //（实测 ss.xingzhige.com 对 B站 数据返回 app=com.tencent.tuwen.lua / appid=100497308 / tag=QQ音乐），
-        // 这会导致卡片显示异常。我方自建卡使用 B站官方分享卡 appid，最贴近真实分享。
+        // B站：走签名通路（与音乐同一个签名服务，format=bilibili），失败才回退自建 news 卡。
+        // 为什么改：QQ **只渲染已签名的卡**；自建 news 卡没有 sign，实测在群里显示不出来（只当链接）。
+        // 代价（如实记录）：签名服务对 B站 会按图文卡兜底，卡片标签显示"QQ音乐"、appid=100497308。
+        // 这是该服务的固定行为（Suran.ShareArk 走同一服务，表现完全一致），换来的是**卡片真的能渲染**。
+        // 想要"appid 正确但可能不渲染"的自建卡：把「B站卡片走签名」关掉即可。
         if (pf == "bilibili")
         {
             if (!Configuration.BiliCardEnabled) { interactor.Poke("B站卡片功能已禁用"); return; }
-            if (string.IsNullOrWhiteSpace(musicId)) { interactor.Poke("请传 BV 号（如 BV15wUXYAEci）"); return; }
-            if (Configuration.MusicArkEnabled || (Configuration.MusicSignUrl?.Trim() ?? "").Length > 0)
-                logger.LogInformation("B站卡片使用自建 news 卡（不经过 ARK/签名服务），以确保 appid 与标签正确");
+            if (string.IsNullOrWhiteSpace(musicId)) { interactor.Poke("请传 BV 号、视频链接或 b23.tv 短链"); return; }
             await SendBiliCardAsync(client, targetId, isGroup, musicId.Trim());
             return;
         }
@@ -2640,6 +2777,8 @@ public class QQEnhanceModule(
             "kugou" => $"https://www.kugou.com/song/#hash={cardId}",
             "kuwo" => $"https://www.kuwo.cn/play_detail/{cardId}",
             "migu" => $"https://music.migu.cn/v3/music/song/{cardId}",
+            "bilibili" => $"https://www.bilibili.com/video/{cardId}",
+            "link" => cardId,                       // 通用链接卡：cardId 本身就是目标 URL
             _ => $"https://music.163.com/song?id={cardId}",
         };
         // 主路径：custom 形式（带完整字段）
@@ -2760,6 +2899,75 @@ public class QQEnhanceModule(
         }
     }
 
+
+    /// <summary>把 BV号 / 视频链接 / b23.tv 短链 统一成 BV 号（解析失败原样返回，由调用方报错）</summary>
+    private async Task<string> NormalizeBiliInputAsync(string input)
+    {
+        string raw = (input ?? "").Trim();
+        Match m = Regex.Match(raw, @"BV[0-9A-Za-z]{10}");
+        if (m.Success) return m.Value;               // BV号 或 链接里已带 BV
+        if (!raw.StartsWith("http", StringComparison.OrdinalIgnoreCase)) return raw;
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, raw);
+            req.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
+            using HttpResponseMessage resp = await _http.SendAsync(req);   // 跟随跳转
+            string finalUrl = resp.RequestMessage?.RequestUri?.ToString() ?? "";
+            Match m2 = Regex.Match(finalUrl, @"BV[0-9A-Za-z]{10}");
+            if (m2.Success) return m2.Value;
+            // b23.tv 短链有时在响应体里带跳转脚本，再兜一层
+            string body = await resp.Content.ReadAsStringAsync();
+            Match m3 = Regex.Match(body, @"BV[0-9A-Za-z]{10}");
+            if (m3.Success) return m3.Value;
+        }
+        catch (Exception e)
+        {
+            logger.LogDebug(e, "B站短链解析失败：{Input}", raw);
+        }
+        return raw;
+    }
+
+    /// <summary>B站卡片签名通路：ARK(xianyuw，需 key) → 自配签名 → 公共免key兜底；全失败返回 null（回退自建卡）</summary>
+    private async Task<string?> TrySignBiliCardAsync(string bv, string title, string up, string cover, string jump)
+    {
+        if (!Configuration.BiliCardUseSign) return null;
+        string t = string.IsNullOrWhiteSpace(title) ? bv : title;
+        string a = string.IsNullOrWhiteSpace(up) ? "bilibili" : up;
+
+        // 1) ARK 服务（用户配了 key 时优先：字段最完整）
+        if (Configuration.MusicArkEnabled && !string.IsNullOrWhiteSpace(Configuration.MusicArkToken))
+        {
+            try
+            {
+                string? arkJson = await SignMusicArkAsync(Configuration.MusicArkUrl.Trim(), Configuration.MusicArkToken.Trim(),
+                    cardId: bv, platform: "bilibili", title: t, artist: a, cover: cover,
+                    playUrl: jump, jumpUrl: jump);
+                if (arkJson != null)
+                {
+                    logger.LogInformation("B站卡片：已通过 ARK 签名服务出卡（{Bv}）", bv);
+                    return arkJson;
+                }
+            }
+            catch (Exception e)
+            {
+                logger.LogDebug(e, "B站 ARK 签名失败，改用下一个通路");
+            }
+        }
+
+        // 2) 自配签名地址 → 3) 公共免 key 兜底
+        foreach (string signUrl in new[] { Configuration.MusicSignUrl?.Trim() ?? "", Configuration.MusicSignFallbackUrl?.Trim() ?? "" })
+        {
+            if (signUrl.Length == 0) continue;
+            string? card = await SignNcmCardAsync(signUrl, bv, t, a, cover, jump, platformType: "bilibili");
+            if (card != null)
+            {
+                logger.LogInformation("B站卡片：已通过签名服务出卡（{Host}）", Uri.TryCreate(signUrl, UriKind.Absolute, out Uri? u) ? u.Host : "?");
+                return card;
+            }
+        }
+        return null;
+    }
+
     /// <summary>B站官方分享卡 appid（QQ 通用图文卡）</summary>
     private const long BiliArkAppId = 100951776;
 
@@ -2767,9 +2975,11 @@ public class QQEnhanceModule(
     /// news 卡不需要签名（QQ 仅对 music 卡校验签名通道），因此不依赖任何签名服务与协议端平台白名单。</summary>
     private async Task SendBiliCardAsync(OneBotClient client, long targetId, bool isGroup, string bv)
     {
+        // 支持三种输入：BV号 / 完整视频链接 / b23.tv 短链（短链先跟随跳转解析出 BV）
+        bv = await NormalizeBiliInputAsync(bv);
         if (!Regex.IsMatch(bv, @"^BV[0-9A-Za-z]{10}$"))
         {
-            interactor.Poke($"BV号格式不正确：{bv}。正确形如 BV15wUXYAEci");
+            interactor.Poke($"没识别出B站视频号：{bv}。请传 BV 号（如 BV15wUXYAEci）或视频链接");
             return;
         }
         string title = "", up = "", cover = "";
@@ -2885,9 +3095,17 @@ public class QQEnhanceModule(
         if (string.IsNullOrWhiteSpace(cover))
             cover = "https://p1.music.126.net/6y-UleORITEDbvrOLV0Q8A==/5639395138885805.jpg";
 
+        string jump = $"https://www.bilibili.com/video/{bv}";
+
+        // 签名优先：QQ 只渲染已签名的卡（签名不可用时回退下面的自建 news 卡）
+        string? signedCard = await TrySignBiliCardAsync(bv, title, up, cover, jump);
+        if (signedCard == null)
+        {
+            logger.LogInformation("B站卡片：签名通路不可用，回退自建 news 卡（无签名，可能不被渲染）");
+        }
+
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         long uin = client.BotId;
-        string jump = $"https://www.bilibili.com/video/{bv}";
         var card = new
         {
             app = "com.tencent.structmsg",
@@ -2912,7 +3130,7 @@ public class QQEnhanceModule(
                 }
             }
         };
-        string cardJson = JsonSerializer.Serialize(card, CardJsonOptions);
+        string cardJson = signedCard ?? JsonSerializer.Serialize(card, CardJsonOptions);
         object message = new object[] { new { type = "json", data = new { data = cardJson } } };
 
         try
@@ -3219,7 +3437,7 @@ public class QQEnhanceModule(
     // ==================== 消息查询 ====================
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("纯查询工具：获取群聊/私聊最近消息及每条的[消息ID:xxx]（真实ID，可为负数）。仅用于查看上下文或取ID，撤回/贴表情/引用回复用 DeleteMsgRecent/SetEmojiRecent/ReplyRecent 直接一步到位，无需先调本函数。群聊传 groupId；私聊传 userId。缓存不足时自动回拉历史消息补齐（历史的ID同样真实可用）。15秒内同一会话查询超过2次会被防抖拒绝")]
+    [Description("纯查询：获取群聊/私聊最近消息及每条的 [消息ID:xxx]（真实ID，可为负数）。仅用于看上下文或取ID——撤回/贴表情/引用回复请直接用对应函数一步到位。群聊传 groupId；私聊传 userId。缓存不足自动回拉补齐（历史ID同样可用）。15秒内同一会话查询超过2次会被防抖拒绝")]
     public async Task QGetMessages(
         [Description("群号（私聊时传0）")] long groupId = 0,
         [Description("QQ号（仅私聊时需要）")] long userId = 0,
