@@ -1467,7 +1467,7 @@ public class QQEnhanceModule(
     }
 
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("给QQ消息贴表情回应（一步到位，无需先查ID；仅群聊，私聊平台不支持）。看到有趣/赞同/暖心/好笑的消息随手贴一个，这是真人最轻量的互动方式。常用表情：201=点赞 264=捂脸 182=笑哭 271=吃瓜 179=doge 268=问号脸（完整对照表传 emojiId=0 查看，别总用同一个）。两种用法：1) 默认贴 target 的最近一条（index 指定倒数第N条）；2) 已知真实消息ID时直接传 messageId（必须来自 QGetMessages 或撤回列表，严禁编造）")]
+    [Description("给QQ消息贴表情回应（一步到位，无需先查ID；仅群聊，私聊平台不支持）。看到有趣/赞同/暖心/好笑的消息随手贴一个，这是真人最轻量的互动方式。常用：201=点赞 264=捂脸 182=笑哭 271=吃瓜 270=emm 179=doge 269=暗中观察 273=我酸了 272=呵呵哒 222=抱抱 227=拍手 311=打call 116=示爱 122=爱你 214=啵啵 219=蹭一蹭 111=可怜 106=委屈 173=泪奔 262=脑阔疼 268=问号脸 265=辣眼睛，更多传 emojiId=0 查看完整对照表再选（别总用同一个）。两种用法：1) 默认贴 target 的最近一条（index 指定倒数第N条）；2) 已知真实消息ID时直接传 messageId（必须来自 QGetMessages 或撤回列表，严禁编造）")]
     public async Task SetEmojiRecent(
         [Description("目标用户QQ号或昵称，\"我\"表示自己")] string target = "",
         [Description("表情ID，默认201=点赞；传 0 = 只显示完整表情ID对照表")] int emojiId = 201,
@@ -3043,8 +3043,12 @@ public class QQEnhanceModule(
             }
         }
 
-        // 2) 自配签名地址 → 3) 公共免 key 兜底
-        foreach (string signUrl in new[] { Configuration.MusicSignUrl?.Trim() ?? "", Configuration.MusicSignFallbackUrl?.Trim() ?? "" })
+        // 2) 自配签名地址 → 3) 公共免 key 兜底（后者受「自动兜底」开关约束，与音乐通路语义一致：
+        //    用户关掉自动兜底 = 不希望走公共签名服务，那就只用自己的）
+        var signUrls = new List<string> { Configuration.MusicSignUrl?.Trim() ?? "" };
+        if (Configuration.MusicSignAutoFallback)
+            signUrls.Add(Configuration.MusicSignFallbackUrl?.Trim() ?? "");
+        foreach (string signUrl in signUrls)
         {
             if (signUrl.Length == 0) continue;
             string? card = await SignNcmCardAsync(signUrl, bv, t, a, cover, jump, platformType: "bilibili");
