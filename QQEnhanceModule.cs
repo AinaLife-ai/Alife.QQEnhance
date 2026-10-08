@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Net.Http;
 using System.Reflection;
 using System.Text;
@@ -2092,7 +2094,7 @@ public class QQEnhanceModule(
 
         try
         {
-            string link = url.Trim();
+            string link = (url ?? "").Trim();
             if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(desc) || string.IsNullOrWhiteSpace(preview))
             {
                 var (ot, od, oi) = await FetchLinkMetaAsync(link);
@@ -2140,17 +2142,98 @@ public class QQEnhanceModule(
         }
     }
 
+
+    /// <summary>
+    /// 外链抓取安全闸：只允许 http/https，且主机必须是**公网地址**。
+    /// 目的：AI 可能被聊天内容诱导去请求 127.0.0.1:3001（NapCat 本机 API）/ 内网设备 / 云元数据地址，
+    /// 抓到的内容还会被写进卡片发到群里（等于把内网信息读出来外发）。这里把这类地址全部挡在门外。
+    /// 域名会做一次 DNS 解析并逐个校验解析结果（防「域名指向内网」）。
+    /// </summary>
+    private static async Task<bool> IsPublicHttpUrlAsync(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? u)) return false;
+        if (u.Scheme != Uri.UriSchemeHttp && u.Scheme != Uri.UriSchemeHttps) return false;
+        try
+        {
+            IPAddress[] addrs;
+            if (IPAddress.TryParse(u.Host, out IPAddress? literal))
+                addrs = new[] { literal };
+            else
+                addrs = await Dns.GetHostAddressesAsync(u.Host);
+            if (addrs.Length == 0) return false;
+            foreach (IPAddress ip in addrs)
+                if (IsPrivateAddress(ip)) return false;
+            return true;
+        }
+        catch
+        {
+            return false;   // 解析不了就当不可信
+        }
+    }
+
+    /// <summary>回环 / 私有 / 链路本地 / 组播 / 未指定 / 云元数据（169.254.169.254）一律算内网</summary>
+    private static bool IsPrivateAddress(IPAddress ip)
+    {
+        if (IPAddress.IsLoopback(ip)) return true;
+        if (ip.AddressFamily == AddressFamily.InterNetworkV6)
+            return ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal || ip.IsIPv6Multicast || ip.Equals(IPAddress.IPv6Any);
+        byte[] b = ip.GetAddressBytes();
+        if (b.Length != 4) return true;
+        return b[0] switch
+        {
+            0 or 10 or 127 => true,                              // 0.0.0.0/8、10/8、127/8
+            169 when b[1] == 254 => true,                        // 169.254/16（含云元数据）
+            172 when b[1] >= 16 && b[1] <= 31 => true,           // 172.16/12
+            192 when b[1] == 168 => true,                        // 192.168/16
+            100 when b[1] >= 64 && b[1] <= 127 => true,          // 100.64/10（CGNAT）
+            >= 224 => true,                                      // 组播/保留
+            _ => false
+        };
+    }
+
+    /// <summary>跟随跳转后再校验一次最终落点（防「公网 URL 302 到内网」）</summary>
+    private static bool FinalHopIsPublic(HttpResponseMessage resp)
+    {
+        Uri? final = resp.RequestMessage?.RequestUri;
+        return final != null && !IsHostLikelyPrivate(final.Host);
+    }
+
+    /// <summary>同步版主机初筛（仅字面量判断，用于跳转落点这种无法再做 DNS 的场合）</summary>
+    private static bool IsHostLikelyPrivate(string host)
+    {
+        if (string.IsNullOrWhiteSpace(host)) return true;
+        if (IPAddress.TryParse(host, out IPAddress? ip)) return IsPrivateAddress(ip);
+        return host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".local", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".internal", StringComparison.OrdinalIgnoreCase)
+            || !host.Contains('.');
+    }
+
     /// <summary>抓取网页 og:title/og:description/og:image（取不到回落 &lt;title&gt;），用于分享卡自动补全</summary>
     private async Task<(string title, string desc, string image)> FetchLinkMetaAsync(string url)
     {
         try
         {
+            // 安全闸①：只抓公网 http/https（AI 可能被聊天内容诱导去读内网/NapCat 本机接口）
+            if (!await IsPublicHttpUrlAsync(url))
+            {
+                logger.LogWarning("分享卡：已拦截非公网地址的抓取请求（防 SSRF）");
+                return ("", "", "");
+            }
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
             req.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
             using HttpResponseMessage resp = await _http.SendAsync(req);
+            // 安全闸②：跟随跳转后的最终落点也要是公网（否则可能 302 到内网）
+            if (!FinalHopIsPublic(resp))
+            {
+                logger.LogWarning("分享卡：跳转落点非公网，已放弃抓取（防重定向型 SSRF）");
+                return ("", "", "");
+            }
             if (!resp.IsSuccessStatusCode) return ("", "", "");
+            long? len = resp.Content.Headers.ContentLength;
+            if (len is > 2_000_000) return ("", "", "");            // 超大页面不抓
             string html = await resp.Content.ReadAsStringAsync();
-            if (html.Length > 200_000) html = html[..200_000];      // 防超大页面
+            if (html.Length > 200_000) html = html[..200_000];      // 解析量上限
 
             static string Unescape(string v) => v.Replace("&amp;", "&").Replace("&quot;", "\"").Replace("&#39;", "'").Trim();
             string Og(string prop)
@@ -2749,15 +2832,22 @@ public class QQEnhanceModule(
         {
             using var doc = JsonDocument.Parse(cardJson);
             var node = JsonNode.Parse(doc.RootElement.GetRawText())!.AsObject();
-            if (!node.ContainsKey("ver")) node["ver"] = "0.0.0.1";
+            // 只补缺、不覆盖：签名服务返回的卡通常已带 ver/prompt/view，此时**原样返回**，
+            // 避免多余的重序列化影响已签名内容（签名对这些字段的有效性由服务端决定）
+            bool changed = false;
+            if (!node.ContainsKey("ver")) { node["ver"] = "0.0.0.1"; changed = true; }
             if (!node.ContainsKey("prompt"))
             {
                 string title = node["meta"]?["music"]?["title"]?.GetValue<string>() ?? "";
                 node["prompt"] = string.IsNullOrEmpty(title) ? "[分享]" : $"[分享]{title}";
+                changed = true;
             }
             if (!node.ContainsKey("view"))
+            {
                 node["view"] = node["meta"]?.AsObject().ContainsKey("music") == true ? "music" : "news";
-            return node.ToJsonString(CardJsonOptions);
+                changed = true;
+            }
+            return changed ? node.ToJsonString(CardJsonOptions) : cardJson;
         }
         catch
         {
@@ -2909,16 +2999,15 @@ public class QQEnhanceModule(
         if (!raw.StartsWith("http", StringComparison.OrdinalIgnoreCase)) return raw;
         try
         {
+            // 安全闸：只解析公网 http/https（防被诱导请求内网地址）
+            if (!await IsPublicHttpUrlAsync(raw)) return raw;
             using var req = new HttpRequestMessage(HttpMethod.Get, raw);
             req.Headers.TryAddWithoutValidation("User-Agent", BrowserUa);
             using HttpResponseMessage resp = await _http.SendAsync(req);   // 跟随跳转
+            if (!FinalHopIsPublic(resp)) return raw;
             string finalUrl = resp.RequestMessage?.RequestUri?.ToString() ?? "";
             Match m2 = Regex.Match(finalUrl, @"BV[0-9A-Za-z]{10}");
             if (m2.Success) return m2.Value;
-            // b23.tv 短链有时在响应体里带跳转脚本，再兜一层
-            string body = await resp.Content.ReadAsStringAsync();
-            Match m3 = Regex.Match(body, @"BV[0-9A-Za-z]{10}");
-            if (m3.Success) return m3.Value;
         }
         catch (Exception e)
         {
