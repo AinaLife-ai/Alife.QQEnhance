@@ -1348,6 +1348,47 @@ public class QQEnhanceModule(
         return sb.ToString();
     }
 
+
+    /// <summary>
+    /// 私聊会话的对端 QQ（显式 messageType=private 时用）：
+    /// 数字目标 ⇒ 它本身就是私聊对端（**不再满库搜索**——这正是"用户刚在群里说过话就被发进群"的根源）；
+    /// "我/自己" ⇒ 取最近有自己发言的私聊会话；昵称 ⇒ 只在私聊会话里找，命中多人则返回 0（不猜）。
+    /// </summary>
+    private long ResolvePrivatePeerId(string target)
+    {
+        string nt = NormalizeTarget(target);
+        long botId = GetBotId();
+        if (long.TryParse(nt, out long uin))
+        {
+            if (botId != 0 && uin == botId)
+            {
+                LiveMessage? mine = _liveMessages.Where(m => m.GroupId == 0 && m.IsSelf)
+                    .OrderByDescending(m => m.Time).ThenByDescending(m => m.Seq).FirstOrDefault();
+                return mine?.PeerId ?? 0;
+            }
+            return uin;
+        }
+        var dm = _liveMessages.Where(m => m.GroupId == 0)
+            .Where(m => m.Nickname.Contains(nt, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (dm.Select(m => m.PeerId).Distinct().Count() > 1) return 0;
+        return dm.OrderByDescending(m => m.Time).ThenByDescending(m => m.Seq).FirstOrDefault()?.PeerId ?? 0;
+    }
+
+    /// <summary>显式 messageType=group 时用：只在**群聊**会话里找该用户最近发言的群号（命中多个群不猜，返回 0）</summary>
+    private long ResolveGroupScopeId(string target)
+    {
+        string nt = NormalizeTarget(target);
+        long botId = GetBotId();
+        bool self = nt is "我" or "自己" || (long.TryParse(nt, out long u) && botId != 0 && u == botId);
+        bool byId = long.TryParse(nt, out long uin);
+        var inGroups = _liveMessages.Where(m => m.GroupId != 0)
+            .Where(m => self ? m.IsSelf : byId ? m.UserId == uin : m.Nickname.Contains(nt, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (inGroups.Select(m => m.GroupId).Distinct().Count() > 1) return 0;
+        return inGroups.OrderByDescending(m => m.Time).ThenByDescending(m => m.Seq).FirstOrDefault()?.GroupId ?? 0;
+    }
+
     /// <summary>定位结果解析：targetId 缺省时自动推断会话；找不到时回拉历史重试一次。
     /// includeRecalled=true 时（仅撤回功能用）候选含已撤回消息，保证与撤回候选列表序号完全一致</summary>
     private async Task<(LiveMessage? msg, bool isGroup, long scopeId, string? error)> ResolveTargetMessageAsync(
@@ -1361,8 +1402,25 @@ public class QQEnhanceModule(
             // targetId 明确给出但 messageType 省略时自动判定群/私聊（不再一律当群聊）
             isGroup = await DetectIsGroupAsync(scopeId, messageType);
         }
+        else if (messageType == "private")
+        {
+            // ★ 显式要求私聊：会话对端就是该 QQ，直接在私聊会话内定位（不再满库找"最近一条"）
+            isGroup = false;
+            scopeId = ResolvePrivatePeerId(target);
+            if (scopeId == 0)
+                return (null, false, 0, $"未能在私聊会话中定位 {target}（多个同名联系人时请改传QQ号，或显式传 targetId=对方QQ）");
+        }
+        else if (messageType == "group")
+        {
+            // ★ 显式要求群聊：只在群聊会话里定位该用户的发言
+            isGroup = true;
+            scopeId = ResolveGroupScopeId(target);
+            if (scopeId == 0)
+                return (null, true, 0, $"未能在群聊中定位 {target} 的发言（多个群都有此人时请显式传 targetId=群号）");
+        }
         else
         {
+            // 未指定类型：保留原启发式——"该用户最近发言所在会话"（与函数文档一致）
             isGroup = messageType != "private";
 
             LiveMessage? any = FindLatestFromUserAnywhere(target);
@@ -1869,7 +1927,7 @@ public class QQEnhanceModule(
     public async Task ForwardRecent(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("转发条数，1-50，默认5")] int count = 5,
-        [Description("消息类型：group或private，可省略，省略时自动判定")] string messageType = "")
+        [Description("消息类型：group或private。**私聊场景务必传 private**（省略时会按该用户最近发言所在会话推断，可能落错会话）")] string messageType = "")
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
         if (targetId == 0) { interactor.Poke("targetId不能为0"); return; }
@@ -1925,7 +1983,7 @@ public class QQEnhanceModule(
     public async Task SendForwardById(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("合并转发消息的消息ID（来自QGetMessages，可为负）")] long forwardId,
-        [Description("消息类型：group或private，可省略，省略时自动判定")] string messageType = "")
+        [Description("消息类型：group或private。**私聊场景务必传 private**（省略时会按该用户最近发言所在会话推断，可能落错会话）")] string messageType = "")
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
         // NapCat node schema 强制要求 nickname/content 必填，缺失直接 RetCode 1400；id 有效时忽略这两个字段
@@ -1939,7 +1997,7 @@ public class QQEnhanceModule(
     public async Task SendForwardNew(
         [Description("目标群号或对方QQ")] long targetId,
         [Description("节点JSON数组（必须是完整合法的JSON，[]闭合）")] string nodesJson,
-        [Description("消息类型：group或private，可省略，省略时自动判定")] string messageType = "")
+        [Description("消息类型：group或private。**私聊场景务必传 private**（省略时会按该用户最近发言所在会话推断，可能落错会话）")] string messageType = "")
     {
         if (!Configuration.ForwardEnabled) { interactor.Poke("合并转发功能已禁用"); return; }
         try
